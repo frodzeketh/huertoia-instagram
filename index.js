@@ -30,6 +30,10 @@ app.get('/', (req, res) => {
   res.send('Bot funcionando!');
 });
 
+app.get('/privacy', (req, res) => {
+  res.send('Política de privacidad: Esta app no almacena datos personales.');
+});
+
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
