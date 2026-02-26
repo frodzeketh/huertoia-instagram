@@ -17,13 +17,25 @@ console.log('TOKEN LENGTH:', ACCESS_TOKEN ? ACCESS_TOKEN.length : 'undefined');
 console.log('TOKEN COMPLETO:', ACCESS_TOKEN);
 console.log('Tipo token:', ES_PAGE_TOKEN ? 'Page (EAA) - OK para enviar mensajes' : 'No es Page token (IGA/u otro) - puede fallar al enviar');
 
-// ID de la cuenta de Instagram (igual que en el webhook entry[].id)
-const INSTAGRAM_ACCOUNT_ID = '17841447765537828';
+// Con token de Página (EAA) la URL debe usar el ID de la Página de Facebook, no el de Instagram.
+// Lo obtenemos con GET /me usando el mismo token.
+let pageIdCache = null;
+
+async function obtenerPageId() {
+  if (pageIdCache) return pageIdCache;
+  const res = await axios.get('https://graph.facebook.com/v25.0/me', {
+    params: { access_token: ACCESS_TOKEN },
+    headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
+  });
+  pageIdCache = res.data.id;
+  console.log('Page ID (Facebook) para mensajes:', pageIdCache);
+  return pageIdCache;
+}
 
 async function enviarMensaje(recipientId, texto) {
   try {
-    // Instagram Messaging exige siempre este ID en la URL (no sirve "me").
-    const url = `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/messages`;
+    const path = ES_PAGE_TOKEN ? await obtenerPageId() : '17841447765537828';
+    const url = `https://graph.facebook.com/v25.0/${path}/messages`;
     const payload = {
       recipient: { id: recipientId },
       message: { text: texto }
