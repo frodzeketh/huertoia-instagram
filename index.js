@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 async function enviarMensaje(recipientId, texto) {
   try {
-    const url = `https://graph.facebook.com/v25.0/me/messages`;
+    const url = `https://graph.facebook.com/v25.0/17841447765537828/messages`;
     const payload = {
       recipient: { id: recipientId },
       message: { text: texto }
