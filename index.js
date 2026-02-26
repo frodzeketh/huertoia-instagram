@@ -31,7 +31,16 @@ app.get('/', (req, res) => {
 });
 
 app.get('/privacy', (req, res) => {
-  res.send('Política de privacidad: Esta app no almacena datos personales.');
+  res.send(`
+    <html>
+      <body>
+        <h1>Política de Privacidad</h1>
+        <p>Esta aplicación no recopila ni almacena datos personales de los usuarios.</p>
+        <p>Los mensajes procesados son utilizados únicamente para responder automáticamente y no son guardados en ninguna base de datos.</p>
+        <p>Para consultas contactar a: facuthekidd@gmail.com</p>
+      </body>
+    </html>
+  `);
 });
 
 app.get('/webhook', (req, res) => {
