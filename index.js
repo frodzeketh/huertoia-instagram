@@ -8,6 +8,9 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PORT = process.env.PORT || 3000;
 
+console.log('TOKEN LENGTH:', ACCESS_TOKEN ? ACCESS_TOKEN.length : 'undefined');
+console.log('TOKEN COMPLETO:', ACCESS_TOKEN);
+
 async function enviarMensaje(recipientId, texto) {
   try {
     const url = `https://graph.facebook.com/v25.0/17841447765537828/messages`;
