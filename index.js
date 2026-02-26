@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const ACCESS_TOKEN = "IGAANQX1DjWRlBZAFppVUQybUlOSW9sVEYwMW5NQ09qTm14WTR1UWltN0luS3A2YXFiX2JMbkR1eURrSGcyV1dPMlBlekFkdlZAOYWcxWmJzc3k2Njk3RUlnd3NoM3paSndONERwYW80NTZAwdDhPUWoxakg4ZAW5yZAVhBUk9yRS0tZAwZDZD";
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PORT = process.env.PORT || 3000;
 
 async function enviarMensaje(recipientId, texto) {
