@@ -9,24 +9,23 @@ const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
 const PORT = process.env.PORT || 3000;
 
 
-// ID de la cuenta Instagram (webhook entry[].id). Debe coincidir con el POST que te funciona en Graph API Explorer.
-// ACCESS_TOKEN: usar el MISMO token que en el Explorer cuando el POST a este ID/messages funciona
-// (puede ser "User Token" con instagram_manage_messages o el que tengas seleccionado ahí).
-const INSTAGRAM_ACCOUNT_ID = '17841447765537828';
+// API con inicio de sesión con Instagram (graph.instagram.com + /me/messages).
+// ACCESS_TOKEN: el que generas en "Configuración de la API con inicio de sesión con Instagram" en el panel de tu app.
+const INSTAGRAM_GRAPH = 'https://graph.instagram.com/v21.0';
 
 console.log('TOKEN LENGTH:', ACCESS_TOKEN ? ACCESS_TOKEN.length : 'undefined');
 console.log('TOKEN COMPLETO:', ACCESS_TOKEN);
 
 async function enviarMensaje(recipientId, texto) {
   try {
-    const url = `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/messages`;
+    const url = `${INSTAGRAM_GRAPH}/me/messages`;
     const payload = {
       recipient: { id: recipientId },
       message: { text: texto }
     };
     console.log('Token usado:', ACCESS_TOKEN.substring(0, 30) + '...');
     console.log('Payload:', JSON.stringify(payload));
-    
+
     const response = await axios.post(url, payload, {
       params: { access_token: ACCESS_TOKEN },
       headers: {
@@ -60,7 +59,7 @@ app.get('/privacy', (req, res) => {
 app.get('/test-token', async (req, res) => {
   try {
     const response = await axios.get(
-      `https://graph.facebook.com/v25.0/17841447765537828`,
+      `${INSTAGRAM_GRAPH}/me`,
       {
         params: { access_token: ACCESS_TOKEN },
         headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` }
