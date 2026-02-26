@@ -1,10 +1,12 @@
 const express = require('express');
 const axios = require('axios');
+require('dotenv').config();
 const app = express();
 app.use(express.json());
 
-const VERIFY_TOKEN = "mitokenhuertoia-bot";
-const ACCESS_TOKEN = "IGAANQX1DjWRlBZAGJNdDRadGphREtPdXlGdkdOVGJNbXJPM3NVM3d0V0dPRjJiREpsUVhoenViRUxTWlZAERnN3dUE4WFI1UHhjNjQzTmZAIZAWZASRUs1V2pjaU5GUkpVa253bGlKYVFNcGRjUDJQbDRQd3phZAmt1MFBWMzJxclE4VQZDZD";
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+const PORT = process.env.PORT || 3000;
 
 async function enviarMensaje(recipientId, texto) {
   try {
@@ -23,6 +25,10 @@ async function enviarMensaje(recipientId, texto) {
     console.error('Error enviando mensaje:', error.response?.data);
   }
 }
+
+app.get('/', (req, res) => {
+  res.send('Bot funcionando!');
+});
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -43,7 +49,6 @@ app.post('/webhook', async (req, res) => {
 
   if (body.object === 'instagram') {
     for (const entry of body.entry) {
-      // Formato 1: entry.messaging
       const messaging = entry.messaging || [];
       for (const event of messaging) {
         if (event.message && !event.message.is_echo) {
@@ -54,7 +59,6 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // Formato 2: entry.changes
       const changes = entry.changes || [];
       for (const change of changes) {
         if (change.field === 'messages') {
@@ -72,6 +76,6 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(3000, () => {
-  console.log('Servidor corriendo en puerto 3000');
+app.listen(PORT, () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });
