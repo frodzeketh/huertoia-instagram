@@ -10,19 +10,20 @@ const PORT = process.env.PORT || 3000;
 
 async function enviarMensaje(recipientId, texto) {
   try {
-    await axios.post(
-      `https://graph.facebook.com/v25.0/me/messages`,
-      {
-        recipient: { id: recipientId },
-        message: { text: texto }
-      },
-      {
-        params: { access_token: ACCESS_TOKEN }
-      }
-    );
-    console.log('Mensaje enviado a:', recipientId);
+    const url = `https://graph.facebook.com/v25.0/me/messages`;
+    const payload = {
+      recipient: { id: recipientId },
+      message: { text: texto }
+    };
+    console.log('Token usado:', ACCESS_TOKEN.substring(0, 30) + '...');
+    console.log('Payload:', JSON.stringify(payload));
+    
+    const response = await axios.post(url, payload, {
+      params: { access_token: ACCESS_TOKEN }
+    });
+    console.log('Respuesta exitosa:', response.data);
   } catch (error) {
-    console.error('Error enviando mensaje:', error.response?.data);
+    console.error('Error completo:', JSON.stringify(error.response?.data));
   }
 }
 
