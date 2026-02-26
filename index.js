@@ -17,11 +17,13 @@ console.log('TOKEN LENGTH:', ACCESS_TOKEN ? ACCESS_TOKEN.length : 'undefined');
 console.log('TOKEN COMPLETO:', ACCESS_TOKEN);
 console.log('Tipo token:', ES_PAGE_TOKEN ? 'Page (EAA) - OK para enviar mensajes' : 'No es Page token (IGA/u otro) - puede fallar al enviar');
 
+// ID de la cuenta de Instagram (igual que en el webhook entry[].id)
+const INSTAGRAM_ACCOUNT_ID = '17841447765537828';
+
 async function enviarMensaje(recipientId, texto) {
   try {
-    // Con Page token usar /me/messages (me = la página). Con otro token usar el ID de la cuenta Instagram.
-    const path = ES_PAGE_TOKEN ? 'me' : '17841447765537828';
-    const url = `https://graph.facebook.com/v25.0/${path}/messages`;
+    // Instagram Messaging exige siempre este ID en la URL (no sirve "me").
+    const url = `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/messages`;
     const payload = {
       recipient: { id: recipientId },
       message: { text: texto }
