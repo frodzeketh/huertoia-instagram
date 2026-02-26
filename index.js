@@ -4,8 +4,8 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || '').trim();
+const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
 const PORT = process.env.PORT || 3000;
 
 console.log('TOKEN LENGTH:', ACCESS_TOKEN ? ACCESS_TOKEN.length : 'undefined');
@@ -22,7 +22,11 @@ async function enviarMensaje(recipientId, texto) {
     console.log('Payload:', JSON.stringify(payload));
     
     const response = await axios.post(url, payload, {
-      params: { access_token: ACCESS_TOKEN }
+      params: { access_token: ACCESS_TOKEN },
+      headers: {
+        'Authorization': `Bearer ${ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
     });
     console.log('Respuesta exitosa:', response.data);
   } catch (error) {
@@ -51,7 +55,10 @@ app.get('/test-token', async (req, res) => {
   try {
     const response = await axios.get(
       `https://graph.facebook.com/v25.0/17841447765537828`,
-      { params: { access_token: ACCESS_TOKEN } }
+      {
+        params: { access_token: ACCESS_TOKEN },
+        headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` }
+      }
     );
     res.json({ ok: true, data: response.data });
   } catch (error) {
