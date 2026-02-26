@@ -8,34 +8,18 @@ const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || '').trim();
 const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
 const PORT = process.env.PORT || 3000;
 
-// IMPORTANTE: Para enviar mensajes por Instagram Messaging hace falta el PAGE ACCESS TOKEN
-// (empieza con EAA...), NO el token de Instagram (IGA...). Obtenerlo en Graph API Explorer
-// seleccionando la Página vinculada a Instagram, o en la app de Meta con permiso instagram_manage_messages.
-const ES_PAGE_TOKEN = ACCESS_TOKEN.startsWith('EAA');
+
+// ID de la cuenta Instagram (webhook entry[].id). Debe coincidir con el POST que te funciona en Graph API Explorer.
+// ACCESS_TOKEN: usar el MISMO token que en el Explorer cuando el POST a este ID/messages funciona
+// (puede ser "User Token" con instagram_manage_messages o el que tengas seleccionado ahí).
+const INSTAGRAM_ACCOUNT_ID = '17841447765537828';
 
 console.log('TOKEN LENGTH:', ACCESS_TOKEN ? ACCESS_TOKEN.length : 'undefined');
 console.log('TOKEN COMPLETO:', ACCESS_TOKEN);
-console.log('Tipo token:', ES_PAGE_TOKEN ? 'Page (EAA) - OK para enviar mensajes' : 'No es Page token (IGA/u otro) - puede fallar al enviar');
-
-// Con token de Página (EAA) la URL debe usar el ID de la Página de Facebook, no el de Instagram.
-// Lo obtenemos con GET /me usando el mismo token.
-let pageIdCache = null;
-
-async function obtenerPageId() {
-  if (pageIdCache) return pageIdCache;
-  const res = await axios.get('https://graph.facebook.com/v25.0/me', {
-    params: { access_token: ACCESS_TOKEN },
-    headers: { Authorization: `Bearer ${ACCESS_TOKEN}` }
-  });
-  pageIdCache = res.data.id;
-  console.log('Page ID (Facebook) para mensajes:', pageIdCache);
-  return pageIdCache;
-}
 
 async function enviarMensaje(recipientId, texto) {
   try {
-    const path = ES_PAGE_TOKEN ? await obtenerPageId() : '17841447765537828';
-    const url = `https://graph.facebook.com/v25.0/${path}/messages`;
+    const url = `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/messages`;
     const payload = {
       recipient: { id: recipientId },
       message: { text: texto }
