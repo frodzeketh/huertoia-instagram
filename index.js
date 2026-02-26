@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 async function enviarMensaje(recipientId, texto) {
   try {
     await axios.post(
-      `https://graph.facebook.com/v18.0/me/messages`,
+      `https://graph.facebook.com/v21.0/me/messages`,
       {
         recipient: { id: recipientId },
         message: { text: texto }
