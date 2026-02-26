@@ -8,12 +8,20 @@ const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || '').trim();
 const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
 const PORT = process.env.PORT || 3000;
 
+// IMPORTANTE: Para enviar mensajes por Instagram Messaging hace falta el PAGE ACCESS TOKEN
+// (empieza con EAA...), NO el token de Instagram (IGA...). Obtenerlo en Graph API Explorer
+// seleccionando la Página vinculada a Instagram, o en la app de Meta con permiso instagram_manage_messages.
+const ES_PAGE_TOKEN = ACCESS_TOKEN.startsWith('EAA');
+
 console.log('TOKEN LENGTH:', ACCESS_TOKEN ? ACCESS_TOKEN.length : 'undefined');
 console.log('TOKEN COMPLETO:', ACCESS_TOKEN);
+console.log('Tipo token:', ES_PAGE_TOKEN ? 'Page (EAA) - OK para enviar mensajes' : 'No es Page token (IGA/u otro) - puede fallar al enviar');
 
 async function enviarMensaje(recipientId, texto) {
   try {
-    const url = `https://graph.facebook.com/v25.0/17841447765537828/messages`;
+    // Con Page token usar /me/messages (me = la página). Con otro token usar el ID de la cuenta Instagram.
+    const path = ES_PAGE_TOKEN ? 'me' : '17841447765537828';
+    const url = `https://graph.facebook.com/v25.0/${path}/messages`;
     const payload = {
       recipient: { id: recipientId },
       message: { text: texto }
