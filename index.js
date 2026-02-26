@@ -4,7 +4,6 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 
-
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -43,6 +42,18 @@ app.get('/privacy', (req, res) => {
       </body>
     </html>
   `);
+});
+
+app.get('/test-token', async (req, res) => {
+  try {
+    const response = await axios.get(
+      `https://graph.facebook.com/v25.0/17841447765537828`,
+      { params: { access_token: ACCESS_TOKEN } }
+    );
+    res.json({ ok: true, data: response.data });
+  } catch (error) {
+    res.json({ error: error.response?.data });
+  }
 });
 
 app.get('/webhook', (req, res) => {
