@@ -370,7 +370,7 @@ async function processMessage(senderId, userText) {
   await sendMessage(senderId, reply);
 }
 
-// ─── Envío de mensajes (chunking) ────────────────────────────
+// ─── Envío de mensajes (chunking) ──────────────────────────────
 async function sendMessage(recipientId, text) {
   // Divide en chunks respetando palabras completas
   const chunks = [];
