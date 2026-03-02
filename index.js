@@ -1,403 +1,340 @@
-const express = require('express');
-const axios = require('axios');
-const OpenAI = require('openai').default;
-const { Pinecone } = require('@pinecone-database/pinecone');
-require('dotenv').config();
+// ============================================================
+//  PlantasdeHuerto Instagram Bot — v2.0
+//  Arquitectura limpia | RAG real | Comportamiento humano
+// ============================================================
 
-const app = express();
+require('dotenv').config();
+const express = require('express');
+const axios   = require('axios');
+const OpenAI  = require('openai').default;
+const { Pinecone } = require('@pinecone-database/pinecone');
+
+// ─── Config ─────────────────────────────────────────────────
+const {
+  VERIFY_TOKEN,
+  ACCESS_TOKEN,
+  OPENAI_API_KEY,
+  PINECONE_API_KEY,
+  PINECONE_INDEX_WEB    = 'huertoia-instagram',
+  PINECONE_INDEX_TIENDA = 'huertoia-tiendafisica',
+  PORT = 3000,
+  REPLY_DELAY_MS = 8000,   // pausa natural antes de responder
+  CONVERSATION_TTL_MS = 7200000, // 2h inactividad limpia la conv
+} = process.env;
+
+const MAX_MSG_LENGTH   = 980;   // Instagram DM hard limit ~1000
+const TOP_K_WEB        = 10;
+const TOP_K_TIENDA     = 8;
+const EMBED_DIMS       = 512;
+const EMBED_MODEL      = 'text-embedding-3-small';
+const CHAT_MODEL       = 'gpt-4o-mini';
+
+// ─── Clientes ────────────────────────────────────────────────
+const app    = express();
 app.use(express.json());
 
-const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || '').trim();
-const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
-const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || '').trim();
-const PORT = process.env.PORT || 3000;
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-const INSTAGRAM_GRAPH = 'https://graph.instagram.com/v21.0';
-const DELAY_MS = 10000; // 10 segundos antes de responder
-const MAX_MESSAGE_LENGTH = 1000; // límite Instagram
+let idxWeb    = null;
+let idxTienda = null;
 
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
-let pineconeIndexWeb = null;
-let pineconeIndexTienda = null;
-let pineconeIndex = null;
-if (process.env.PINECONE_API_KEY) {
-  try {
-    const pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
-    const idxWeb = (process.env.PINECONE_INDEX_WEB || process.env.PINECONE_INDEX || '').trim();
-    const idxTienda = (process.env.PINECONE_INDEX_TIENDA || '').trim();
-    if (idxWeb) pineconeIndexWeb = pinecone.Index(idxWeb);
-    if (idxTienda) pineconeIndexTienda = pinecone.Index(idxTienda);
-    if (!pineconeIndexWeb && (process.env.PINECONE_INDEX || '').trim()) pineconeIndex = pinecone.Index((process.env.PINECONE_INDEX || '').trim());
-  } catch (e) {
-    console.warn('Pinecone no inicializado:', e.message);
-  }
+if (PINECONE_API_KEY) {
+  const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
+  idxWeb    = pc.Index(PINECONE_INDEX_WEB);
+  idxTienda = pc.Index(PINECONE_INDEX_TIENDA);
+  console.log(`✅ Pinecone: web="${PINECONE_INDEX_WEB}" tienda="${PINECONE_INDEX_TIENDA}"`);
+} else {
+  console.warn('⚠️  PINECONE_API_KEY no definida');
 }
 
-const SYSTEM_PROMPT = `Eres vendedor experto de PlantasdeHuerto.com (vivero El Huerto Deitana, Totana, Murcia).
-Contacto: 968 422 335 | info@plantasdehuerto.com
+// ─── System Prompt con placeholder ───────────────────────────
+// {{CATALOGO_WEB}} y {{CATALOGO_TIENDA}} se reemplazan en runtime
+const SYSTEM_PROMPT_TEMPLATE = `Eres un asesor de ventas experto de PlantasdeHuerto.com, el vivero online del Huerto Deitana (Totana, Murcia).
+Hablas con clientes por Instagram de forma natural, cercana y humana — NUNCA como un bot o un catálogo.
 
-BÚSQUEDA: Usa "buscar_productos" para encontrar artículos. Puedes buscar varias veces con distintos términos.
+DATOS DE CONTACTO: 968 422 335 | info@plantasdehuerto.com | Totana, Murcia
 
-═══════════════════════════════════════════════
-TU OBJETIVO: VENDER Y AYUDAR AL CLIENTE
-═══════════════════════════════════════════════
+════════════════════════════════════════
+CATÁLOGO DISPONIBLE EN WEB (compra online ya disponible)
+════════════════════════════════════════
+{{CATALOGO_WEB}}
 
-1. PRIORIZA WEB, PERO MENCIONA TIENDA FÍSICA
-   - Primero muestra lo disponible en WEB (puede comprar ya)
-   - SIEMPRE menciona también la tienda física si hay más opciones ahí
-   - Ejemplo: "En web tenemos 2 perales. En tienda física hay más variedad si puedes acercarte."
+════════════════════════════════════════
+CATÁLOGO TIENDA FÍSICA (solo presencial, Totana)
+════════════════════════════════════════
+{{CATALOGO_TIENDA}}
 
-2. VENTA COMPLEMENTARIA (MUY IMPORTANTE)
-   Cuando el cliente elige algo, SIEMPRE pregunta y sugiere:
-   - "¿Lo plantas en maceta o en tierra?" → ofrece macetas, sustratos
-   - "¿Tienes abono para [tipo de planta]?" → busca abonos
-   - "Para evitar plagas te vendría bien..." → busca insecticidas
-   - "¿Necesitas tutores/riego/herramientas?"
-   
-   NO esperes a que pregunte. TÚ guías la venta.
+════════════════════════════════════════
+CÓMO ACTUAR
+════════════════════════════════════════
 
-3. ADAPTA EL FORMATO AL CONTEXTO
-   - Frustración/problema → empatiza, pregunta, NO listes productos aún
-   - Pregunta abierta → haz 1-2 preguntas, luego recomienda poco
-   - Modo compra → ahí SÍ lista productos con precios
-   - Conversación normal → párrafos naturales, sin viñetas
+1. USA EL CATÁLOGO QUE TIENES ARRIBA
+   - Responde SOLO con productos que aparecen en el catálogo inyectado.
+   - Si un producto está en WEB → el cliente lo puede comprar online ahora mismo.
+   - Si está en TIENDA → indícalo y menciona que puede acercarse a Totana.
+   - Si no tienes resultados → díselo con honestidad y ofrece alternativas o contacto.
 
-4. MANTÉN EL CONTEXTO
-   - Recuerda lo que el cliente dijo antes
-   - Si habló de plantar en invierno y luego pregunta por perales, conecta: 
-     "Para plantar ahora en invierno, te recomiendo el Peral Conferencia que aguanta bien el frío..."
-   - Usa lo que sabes del cliente para personalizar
+2. SÉ HUMANO, NO UN ROBOT
+   - Escribe como una persona real: frases cortas, tono cálido, a veces informales.
+   - No uses listas interminables. Máximo 2-3 productos por mensaje.
+   - No repitas la misma estructura de respuesta siempre.
+   - Si el cliente está frustrado, empatiza ANTES de dar información.
 
-5. CIERRA LA VENTA
-   - Resume lo que podría llevar
-   - Pregunta si quiere añadir algo más
-   - Ofrece ayuda para completar el pedido
+3. VENTA CONSULTIVA (ESCUCHA Y SUGIERE)
+   - Haz preguntas para entender: ¿maceta o tierra? ¿interior o exterior? ¿cuánto espacio?
+   - Cuando el cliente elija algo, sugiere UN complementario relevante (sustrato, abono, maceta, riego...).
+   - No bombardees con productos. Una sugerencia bien colocada vale más que diez.
 
-═══════════════════════════════════════════════
-EJEMPLOS DE BUENAS RESPUESTAS
-═══════════════════════════════════════════════
+4. MEMORIA DE CONVERSACIÓN
+   - Conecta lo que el cliente dijo antes con lo nuevo.
+   - Si antes mencionó "planto en terraza", úsalo al recomendar.
 
-EJEMPLO 1 - Cliente elige producto:
-Usuario: "me llevo el peral conferencia"
-Tú: "¡Buena elección! El Peral Conferencia es muy productivo y resistente. 
-¿Lo vas a plantar en tierra o en maceta? Si es maceta, necesitarás una de al menos 40-50L para que desarrolle bien las raíces.
-También te recomiendo un sustrato para frutales y, si quieres asegurar una buena cosecha, un abono específico para perales. ¿Te busco opciones?"
-
-EJEMPLO 2 - Mencionar tienda física:
-Usuario: "tienes manzanos?"
-Tú: "En la web ahora mismo tenemos el Manzano Golden a €15.90 (3 unidades).
-En nuestra tienda física en Totana hay más variedades: Fuji, Reineta, Granny Smith... Si puedes acercarte, tienes más donde elegir.
-¿Cuál te interesa más?"
-
-EJEMPLO 3 - Mantener contexto:
-Usuario: "quiero algo resistente al frío"
-Tú: [busca plantas resistentes al frío]
-Usuario: "vale, ¿y frutales?"
-Tú: "Para frutales resistentes al frío te van perfecto los perales, manzanos y cerezos. Son de los que mejor aguantan temperaturas bajas. ¿Tienes preferencia por alguno?"
-
-═══════════════════════════════════════════════
+5. CIERRE NATURAL
+   - Cuando el cliente esté decidido, ayúdale a completar: "¿Lo pedimos ya por la web o prefieres pasarte por Totana?"
+   - No dejes ninguna conversación sin una llamada a la acción clara.
 
 NUNCA:
-- Respondas siempre con el mismo formato de lista
-- Ignores lo que el cliente dijo antes
-- Olvides mencionar la tienda física
-- Dejes ir al cliente sin ofrecer complementarios
-- Seas robótico o repetitivo
+- Inventes productos o precios que no están en el catálogo inyectado.
+- Uses el mismo formato de respuesta siempre.
+- Olvides mencionar la tienda física cuando tengas stock allí.
+- Seas frío, genérico o robótico.`;
 
-RECUERDA: Eres un vendedor que quiere ayudar al cliente a tener éxito en sus plantas, no un catálogo.
-
-Información del catálogo (base vectorial, usa solo esto para productos):
-{{ CATALOGO }}`;
-
-async function getEmbedding(query) {
-  if (!openai) return null;
+// ─── Helpers ─────────────────────────────────────────────────
+async function embed(text) {
   const res = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: query,
-    dimensions: 512
+    model: EMBED_MODEL,
+    input: text,
+    dimensions: EMBED_DIMS,
   });
   return res.data[0].embedding;
 }
 
-async function retrieveFromVector(query) {
-  const hasWeb = !!pineconeIndexWeb;
-  const hasTienda = !!pineconeIndexTienda;
-  const hasSingle = !!pineconeIndex;
-  if ((!hasWeb && !hasTienda && !hasSingle) || !openai) return '';
+function metaToText(meta) {
+  if (!meta || typeof meta !== 'object') return '';
+  return Object.entries(meta)
+    .filter(([, v]) => v != null && String(v).trim() !== '')
+    .map(([k, v]) => `${k}: ${String(v).trim()}`)
+    .join(' | ');
+}
+
+// Recupera artículos relevantes de ambos índices dado un query
+async function retrieveCatalog(query) {
+  const result = { web: '', tienda: '' };
+  if (!idxWeb && !idxTienda) return result;
+
+  let vector;
   try {
-    const vector = await getEmbedding(query);
-    if (!vector) return '';
-    const opts = { vector, topK: 12, includeMetadata: true };
-    let fromWeb = [];
-    let fromTienda = [];
-    let fromSingle = [];
-    if (hasWeb) {
-      const r = await pineconeIndexWeb.query(opts).catch(() => ({ matches: [] }));
-      fromWeb = (r.matches || []).map(m => m.metadata && { ...m.metadata, _source: 'web' }).filter(Boolean);
-    }
-    if (hasTienda) {
-      const r = await pineconeIndexTienda.query(opts).catch(() => ({ matches: [] }));
-      fromTienda = (r.matches || []).map(m => m.metadata && { ...m.metadata, _source: 'tienda' }).filter(Boolean);
-    }
-    if (hasSingle) {
-      const r = await pineconeIndex.query(opts).catch(() => ({ matches: [] }));
-      fromSingle = (r.matches || []).map(m => m.metadata).filter(Boolean);
-    }
-    const products = fromWeb.length || fromTienda.length ? [...fromWeb, ...fromTienda] : fromSingle;
-    const lines = products.slice(0, 10).map(formatProduct);
-    console.log(`  📎 Vector: ${products.length} artículos`);
-    return lines.length ? lines.join('\n') : '';
+    vector = await embed(query);
   } catch (e) {
-    console.error('❌ retrieveFromVector', e.message);
-    return '';
+    console.error('❌ embed error:', e.message);
+    return result;
   }
+
+  const queryOpts = (topK) => ({ vector, topK, includeMetadata: true });
+
+  if (idxWeb) {
+    try {
+      const r = await idxWeb.query(queryOpts(TOP_K_WEB));
+      const items = (r.matches || []).filter(m => m.score > 0.3).map(m => metaToText(m.metadata));
+      result.web = items.join('\n');
+      console.log(`  🌐 Web: ${items.length} resultados (query: "${query}")`);
+    } catch (e) {
+      console.error('❌ Pinecone web:', e.message);
+    }
+  }
+
+  if (idxTienda) {
+    try {
+      const r = await idxTienda.query(queryOpts(TOP_K_TIENDA));
+      const items = (r.matches || []).filter(m => m.score > 0.3).map(m => metaToText(m.metadata));
+      result.tienda = items.join('\n');
+      console.log(`  🏪 Tienda: ${items.length} resultados`);
+    } catch (e) {
+      console.error('❌ Pinecone tienda:', e.message);
+    }
+  }
+
+  return result;
 }
 
-function formatProduct(p) {
-  if (p._source === 'web' || (p.enlace != null && p.denominacion != null)) {
-    const nombre = p.denominacion || 'N/A';
-    const precio = p.precio_final != null ? String(p.precio_final) : '—';
-    const ref = p.referencia || '—';
-    const stock = p.stock != null ? String(p.stock) : '—';
-    const enlace = p.enlace || '';
-    const desc = (p.descripciones && String(p.descripciones).trim()) ? String(p.descripciones).substring(0, 180) : '';
-    let info = `${nombre} | ${precio} | Ref: ${ref} | Stock: ${stock}`;
-    if (enlace) info += ` | Enlace: ${enlace}`;
-    if (desc) info += ` | ${desc}`;
-    return info;
-  }
-  if (p._source === 'tienda' || (p.codigo_referencia != null && p.denominacion != null && p.enlace == null)) {
-    const nombre = p.denominacion || 'N/A';
-    const precio = p.precio != null ? `${Number(p.precio).toFixed(2)} €` : '—';
-    const ref = p.codigo_referencia || '—';
-    const stock = p.stock != null ? String(p.stock) : '—';
-    return `[Tienda] ${nombre} | ${precio} | Ref: ${ref} | Stock: ${stock}`;
-  }
-  const nombre = p.descripcion_bandeja || p.denominacion_web || p.denominacion_familia || 'N/A';
-  const precio = p.precio_de_venta_bandeja ?? p.precio_web ?? p.precio_fisico ?? 0;
-  const stockWeb = p.stock_web ?? 0;
-  const stockFisico = p.stock_fisico ?? 0;
-  const dispo = stockWeb > 0 ? `${stockWeb} en WEB` : `${stockFisico} en TIENDA FÍSICA`;
-  let info = `${nombre} | Cód: ${p.codigo_referencia || 'N/A'} | €${Number(precio).toFixed(2)} | ${dispo}`;
-  if (p.descripcion_de_cada_articulo && String(p.descripcion_de_cada_articulo) !== 'N/A') {
-    info += ` | ${String(p.descripcion_de_cada_articulo).substring(0, 120)}`;
-  }
-  return info;
+function buildSystemPrompt(catalogWeb, catalogTienda) {
+  return SYSTEM_PROMPT_TEMPLATE
+    .replace('{{CATALOGO_WEB}}',    catalogWeb    || '(Sin resultados para esta consulta en web.)')
+    .replace('{{CATALOGO_TIENDA}}', catalogTienda || '(Sin resultados para esta consulta en tienda física.)');
 }
 
-async function searchProducts(query, webOnly = false) {
-  const hasWeb = !!pineconeIndexWeb;
-  const hasTienda = !!pineconeIndexTienda;
-  const hasSingle = !!pineconeIndex;
-  if ((!hasWeb && !hasTienda && !hasSingle) || !openai) return [];
-  try {
-    console.log(`  🔍 "${query}"${webOnly ? ' (web)' : ''}`);
-    const vector = await getEmbedding(query);
-    if (!vector) return [];
-    const opts = { vector, topK: 15, includeMetadata: true };
-    let fromWeb = [], fromTienda = [], fromSingle = [];
-    if (hasWeb) {
-      const r = await pineconeIndexWeb.query(opts).catch(() => ({ matches: [] }));
-      fromWeb = (r.matches || []).map(m => m.metadata && { ...m.metadata, _source: 'web' }).filter(Boolean);
-    }
-    if (hasTienda && !webOnly) {
-      const r = await pineconeIndexTienda.query(opts).catch(() => ({ matches: [] }));
-      fromTienda = (r.matches || []).map(m => m.metadata && { ...m.metadata, _source: 'tienda' }).filter(Boolean);
-    }
-    if (hasSingle) {
-      const r = await pineconeIndex.query(opts).catch(() => ({ matches: [] }));
-      fromSingle = (r.matches || []).map(m => m.metadata).filter(Boolean);
-    }
-    const products = fromWeb.length || fromTienda.length ? [...fromWeb, ...fromTienda] : fromSingle;
-    console.log(`     → ${fromWeb.length} web, ${fromTienda.length} tienda`);
-    return products;
-  } catch (e) {
-    console.error('❌ searchProducts', e.message);
-    return [];
-  }
-}
-
-const tools = [
-  {
-    type: 'function',
-    function: {
-      name: 'buscar_productos',
-      description: 'Busca productos en el catálogo. PUEDES llamar varias veces con distintos términos. Busca la planta principal y también complementarios (macetas, sustratos, abonos, insecticidas).',
-      parameters: {
-        type: 'object',
-        properties: {
-          termino: { type: 'string', description: 'Término de búsqueda: nombre de planta, categoría, o producto complementario' },
-          solo_web: { type: 'boolean', description: 'True = solo productos disponibles en web', default: false }
-        },
-        required: ['termino']
-      }
-    }
-  }
-];
-
+// ─── Gestión de conversaciones ───────────────────────────────
+// Estructura: Map<senderId, { messages: [], lastActivity: timestamp }>
 const conversations = new Map();
 
-function getConversation(senderId) {
+function getConv(senderId) {
   if (!conversations.has(senderId)) {
-    conversations.set(senderId, { messages: [], createdAt: Date.now() });
+    conversations.set(senderId, { messages: [], lastActivity: Date.now() });
   }
-  return conversations.get(senderId);
+  const conv = conversations.get(senderId);
+  conv.lastActivity = Date.now();
+  return conv;
 }
 
+// Limpieza periódica de conversaciones inactivas
 setInterval(() => {
-  const now = Date.now();
+  const cutoff = Date.now() - CONVERSATION_TTL_MS;
   for (const [id, conv] of conversations.entries()) {
-    if (now - conv.createdAt > 3600000) conversations.delete(id);
-  }
-}, 300000);
-
-async function enviarMensaje(recipientId, texto) {
-  const chunks = [];
-  for (let i = 0; i < texto.length; i += MAX_MESSAGE_LENGTH) {
-    chunks.push(texto.slice(i, i + MAX_MESSAGE_LENGTH));
-  }
-  if (chunks.length === 0) chunks.push('¿En qué más puedo ayudarte?');
-  for (const chunk of chunks) {
-    try {
-      const url = `${INSTAGRAM_GRAPH}/me/messages`;
-      const payload = { recipient: { id: recipientId }, message: { text: chunk } };
-      await axios.post(url, payload, {
-        params: { access_token: ACCESS_TOKEN },
-        headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' }
-      });
-      if (chunks.length > 1) await new Promise(r => setTimeout(r, 500));
-    } catch (error) {
-      console.error('Error enviarMensaje:', error.response?.data || error.message);
+    if (conv.lastActivity < cutoff) {
+      conversations.delete(id);
+      console.log(`🗑️  Conversación expirada: ${id}`);
     }
   }
+}, 300_000);
+
+// ─── Núcleo IA ───────────────────────────────────────────────
+// Construye el query de búsqueda combinando el mensaje actual con contexto reciente
+function buildSearchQuery(messages, newMessage) {
+  // Toma los últimos 2 turnos + el mensaje nuevo para que el RAG tenga contexto
+  const recent = messages
+    .slice(-4)
+    .map(m => m.content)
+    .concat(newMessage)
+    .join(' ');
+  return recent.slice(0, 500); // limita longitud del embedding
 }
 
-async function procesarConIA(senderId, texto) {
-  if (!openai) {
-    await enviarMensaje(senderId, 'Lo siento, el asistente no está configurado (falta OPENAI_API_KEY).');
-    return;
-  }
-  const conv = getConversation(senderId);
-  conv.messages.push({ role: 'user', content: texto });
-  const recent = conv.messages.slice(-15);
+async function processMessage(senderId, userText) {
+  const conv = getConv(senderId);
 
-  const catalogContent = await retrieveFromVector(texto);
-  const systemContent = SYSTEM_PROMPT.replace('{{ CATALOGO }}', catalogContent || '(Sin resultados en catálogo para esta consulta.)');
+  // 1. Construir query de búsqueda con contexto acumulado
+  const searchQuery = buildSearchQuery(conv.messages, userText);
 
-  let response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [{ role: 'system', content: systemContent }, ...recent],
-    tools,
-    tool_choice: 'auto',
-    max_tokens: 800,
-    temperature: 0.75
-  });
+  // 2. Recuperar catálogo relevante de Pinecone
+  const { web: catalogWeb, tienda: catalogTienda } = await retrieveCatalog(searchQuery);
 
-  let assistantMessage = response.choices[0].message;
-  let searchCount = 0;
+  // 3. Inyectar catálogo en system prompt
+  const systemPrompt = buildSystemPrompt(catalogWeb, catalogTienda);
 
-  while (assistantMessage.tool_calls && searchCount < 6) {
-    const toolResults = [];
-    for (const call of assistantMessage.tool_calls) {
-      if (call.function.name === 'buscar_productos') {
-        const args = JSON.parse(call.function.arguments || '{}');
-        const products = await searchProducts(args.termino || '', args.solo_web || false);
-        const formatted = products.length > 0
-          ? products.slice(0, 8).map(formatProduct).join('\n')
-          : 'No encontrado. Intenta con otro término.';
-        toolResults.push({ tool_call_id: call.id, role: 'tool', content: formatted });
-        searchCount++;
-      }
-    }
-    response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemContent },
-        ...conv.messages.slice(-12),
-        assistantMessage,
-        ...toolResults
-      ],
-      tools,
-      tool_choice: 'auto',
-      max_tokens: 800,
-      temperature: 0.75
-    });
-    assistantMessage = response.choices[0].message;
-  }
+  // 4. Añadir mensaje del usuario al historial
+  conv.messages.push({ role: 'user', content: userText });
 
-  const reply = assistantMessage.content || 'No pude procesar tu consulta. ¿Puedes reformularla?';
-  conv.messages.push({ role: 'assistant', content: reply });
-  console.log(`💬 Respuesta lista (${searchCount} búsquedas)`);
-  await enviarMensaje(senderId, reply);
-}
+  // 5. Mantener ventana de contexto razonable (últimos 20 turnos)
+  const contextWindow = conv.messages.slice(-20);
 
-// --- Rutas ---
-
-app.get('/', (req, res) => res.send('Bot funcionando!'));
-
-app.get('/privacy', (req, res) => {
-  res.send(`
-    <html><body>
-      <h1>Política de Privacidad</h1>
-      <p>Esta aplicación no recopila ni almacena datos personales de los usuarios.</p>
-      <p>Los mensajes se procesan para responder automáticamente y no se guardan en base de datos.</p>
-      <p>Contacto: facuthekidd@gmail.com</p>
-    </body></html>
-  `);
-});
-
-app.get('/test-token', async (req, res) => {
+  // 6. Llamar a la IA
+  let reply;
   try {
-    const response = await axios.get(`${INSTAGRAM_GRAPH}/me`, {
-      params: { access_token: ACCESS_TOKEN },
-      headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` }
+    const response = await openai.chat.completions.create({
+      model: CHAT_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...contextWindow,
+      ],
+      max_tokens: 600,
+      temperature: 0.8,   // más natural/humano
     });
-    res.json({ ok: true, data: response.data });
-  } catch (error) {
-    res.json({ error: error.response?.data });
+    reply = response.choices[0].message.content?.trim()
+      || 'Perdona, no pude procesar bien tu consulta. ¿Me lo explicas de otra forma?';
+  } catch (e) {
+    console.error('❌ OpenAI error:', e.message);
+    reply = 'Ups, algo falló en mi parte. ¿Me mandas el mensaje de nuevo?';
   }
+
+  // 7. Guardar respuesta en historial
+  conv.messages.push({ role: 'assistant', content: reply });
+
+  console.log(`💬 [${senderId}] → "${userText.slice(0, 60)}..."`);
+  console.log(`   ← "${reply.slice(0, 80)}..."`);
+
+  // 8. Enviar respuesta
+  await sendMessage(senderId, reply);
+}
+
+// ─── Envío de mensajes (chunking) ────────────────────────────
+async function sendMessage(recipientId, text) {
+  // Divide en chunks respetando palabras completas
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= MAX_MSG_LENGTH) {
+      chunks.push(remaining);
+      break;
+    }
+    let cutAt = remaining.lastIndexOf(' ', MAX_MSG_LENGTH);
+    if (cutAt < 0) cutAt = MAX_MSG_LENGTH;
+    chunks.push(remaining.slice(0, cutAt));
+    remaining = remaining.slice(cutAt).trimStart();
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    try {
+      await axios.post(
+        `https://graph.instagram.com/v21.0/me/messages`,
+        { recipient: { id: recipientId }, message: { text: chunks[i] } },
+        {
+          params: { access_token: ACCESS_TOKEN },
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+      if (i < chunks.length - 1) await sleep(600);
+    } catch (err) {
+      console.error('❌ sendMessage:', err.response?.data || err.message);
+    }
+  }
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// ─── Rutas Express ───────────────────────────────────────────
+app.get('/', (_req, res) => res.send('🌱 PlantasdeHuerto Bot v2 — Online'));
+
+app.get('/privacy', (_req, res) => {
+  res.send(`<html><body>
+    <h1>Política de Privacidad</h1>
+    <p>Los mensajes se procesan en tiempo real para responder automáticamente y no se almacenan en base de datos permanente.</p>
+    <p>Contacto: info@plantasdehuerto.com</p>
+  </body></html>`);
 });
 
+// Verificación del webhook Instagram
 app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+  const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('Webhook verificado!');
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
+    console.log('✅ Webhook verificado');
+    return res.status(200).send(challenge);
   }
+  res.sendStatus(403);
 });
 
+// Recepción de mensajes
 app.post('/webhook', (req, res) => {
+  // Responder 200 inmediatamente (Instagram requiere <5s)
   res.sendStatus(200);
-  const body = req.body;
-  if (body.object !== 'instagram') return;
 
-  for (const entry of body.entry || []) {
-    const messaging = entry.messaging || [];
-    for (const event of messaging) {
+  const { object, entry = [] } = req.body;
+  if (object !== 'instagram') return;
+
+  for (const e of entry) {
+    // Formato messaging (DMs estándar)
+    for (const event of (e.messaging || [])) {
       if (event.message && !event.message.is_echo) {
-        const senderId = event.sender.id;
-        const texto = (event.message.text || '').trim();
-        if (!texto) continue;
-        console.log('Mensaje de:', senderId, ':', texto);
-        (async () => {
-          await new Promise(r => setTimeout(r, DELAY_MS));
-          await procesarConIA(senderId, texto);
-        })();
+        const senderId = event.sender?.id;
+        const text     = event.message?.text?.trim();
+        if (senderId && text) {
+          console.log(`📥 [${senderId}]: "${text}"`);
+          (async () => {
+            await sleep(REPLY_DELAY_MS); // pausa humana
+            await processMessage(senderId, text);
+          })();
+        }
       }
     }
-    for (const change of entry.changes || []) {
+    // Formato changes (webhook v2)
+    for (const change of (e.changes || [])) {
       if (change.field === 'messages') {
         const senderId = change.value?.sender?.id;
-        const texto = (change.value?.message?.text || '').trim();
-        if (senderId && texto) {
-          console.log('Mensaje de:', senderId, ':', texto);
+        const text     = change.value?.message?.text?.trim();
+        if (senderId && text) {
+          console.log(`📥 [${senderId}] (change): "${text}"`);
           (async () => {
-            await new Promise(r => setTimeout(r, DELAY_MS));
-            await procesarConIA(senderId, texto);
+            await sleep(REPLY_DELAY_MS);
+            await processMessage(senderId, text);
           })();
         }
       }
@@ -405,10 +342,40 @@ app.post('/webhook', (req, res) => {
   }
 });
 
+// Debug: test de conexión y RAG en vivo
+app.get('/test-rag', async (req, res) => {
+  const query = req.query.q || 'tomatera cherry';
+  try {
+    const catalog = await retrieveCatalog(query);
+    res.json({
+      query,
+      web_results:    catalog.web    ? catalog.web.split('\n').length    : 0,
+      tienda_results: catalog.tienda ? catalog.tienda.split('\n').length : 0,
+      web_sample:    catalog.web.slice(0, 500),
+      tienda_sample: catalog.tienda.slice(0, 300),
+    });
+  } catch (e) {
+    res.json({ error: e.message });
+  }
+});
+
+app.get('/test-token', async (_req, res) => {
+  try {
+    const r = await axios.get('https://graph.instagram.com/v21.0/me', {
+      params: { access_token: ACCESS_TOKEN },
+    });
+    res.json({ ok: true, data: r.data });
+  } catch (e) {
+    res.json({ error: e.response?.data || e.message });
+  }
+});
+
+// ─── Start ───────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log('Servidor en puerto', PORT);
-  console.log('OpenAI:', openai ? 'ok' : 'no (OPENAI_API_KEY)');
-  console.log('Pinecone web:', pineconeIndexWeb ? 'ok' : (pineconeIndex ? 'ok (INDEX)' : 'no'));
-  console.log('Pinecone tienda:', pineconeIndexTienda ? 'ok' : 'no');
-  console.log('Retraso respuesta:', DELAY_MS / 1000, 's');
+  console.log(`\n🌱 PlantasdeHuerto Bot v2.0`);
+  console.log(`   Puerto:       ${PORT}`);
+  console.log(`   OpenAI:       ${OPENAI_API_KEY  ? '✅' : '❌ falta OPENAI_API_KEY'}`);
+  console.log(`   Pinecone web: ${idxWeb    ? `✅ ${PINECONE_INDEX_WEB}`    : '❌'}`);
+  console.log(`   Pinecone tda: ${idxTienda ? `✅ ${PINECONE_INDEX_TIENDA}` : '❌'}`);
+  console.log(`   Delay:        ${REPLY_DELAY_MS / 1000}s\n`);
 });
