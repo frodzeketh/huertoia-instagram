@@ -40,8 +40,8 @@ let idxTienda = null;
 
 if (PINECONE_API_KEY) {
   const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
-  idxWeb    = pc.Index(PINECONE_INDEX_WEB);
-  idxTienda = pc.Index(PINECONE_INDEX_TIENDA);
+  idxWeb    = pc.Index(PINECONE_INDEX_WEB).namespace('articulos');
+  idxTienda = pc.Index(PINECONE_INDEX_TIENDA).namespace('tiendafisica');
   console.log(`✅ Pinecone: web="${PINECONE_INDEX_WEB}" tienda="${PINECONE_INDEX_TIENDA}"`);
 } else {
   console.warn('⚠️  PINECONE_API_KEY no definida');
@@ -382,33 +382,6 @@ app.get('/test-token', async (_req, res) => {
   }
 });
 
-
-// ─── Debug: diagnóstico completo Pinecone ────────────────────
-// GET /debug-pinecone  → stats + metadata real de 3 registros
-app.get('/debug-pinecone', async (req, res) => {
-  try {
-    const statsWeb    = idxWeb    ? await idxWeb.describeIndexStats()    : null;
-    const statsTienda = idxTienda ? await idxTienda.describeIndexStats() : null;
-
-    const dimsWeb    = statsWeb?.dimension    || 1536;
-    const dimsTienda = statsTienda?.dimension || 1536;
-
-    const sampleWeb    = idxWeb    ? await idxWeb.query({
-      vector: Array(dimsWeb).fill(0.01), topK: 3, includeMetadata: true
-    }) : { matches: [] };
-
-    const sampleTienda = idxTienda ? await idxTienda.query({
-      vector: Array(dimsTienda).fill(0.01), topK: 3, includeMetadata: true
-    }) : { matches: [] };
-
-    res.json({
-      web:    { stats: statsWeb,    sample: sampleWeb.matches },
-      tienda: { stats: statsTienda, sample: sampleTienda.matches },
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0, 6) });
-  }
-});
 
 // ─── Start ───────────────────────────────────────────────────
 app.listen(PORT, () => {
