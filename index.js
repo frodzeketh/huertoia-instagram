@@ -135,9 +135,10 @@ async function retrieveCatalog(query) {
   if (idxWeb) {
     try {
       const r = await idxWeb.query(queryOpts(TOP_K_WEB));
-      const items = (r.matches || []).filter(m => m.score > 0.3).map(m => metaToText(m.metadata));
+      const scores = (r.matches || []).map(m => m.score?.toFixed(3)).join(', ');
+      const items = (r.matches || []).filter(m => m.score > 0.0).map(m => metaToText(m.metadata));
       result.web = items.join('\n');
-      console.log(`  🌐 Web: ${items.length} resultados (query: "${query}")`);
+      console.log(`  🌐 Web: ${items.length} resultados | scores: [${scores}] | query: "${query}"`);
     } catch (e) {
       console.error('❌ Pinecone web:', e.message);
     }
@@ -146,7 +147,7 @@ async function retrieveCatalog(query) {
   if (idxTienda) {
     try {
       const r = await idxTienda.query(queryOpts(TOP_K_TIENDA));
-      const items = (r.matches || []).filter(m => m.score > 0.3).map(m => metaToText(m.metadata));
+      const items = (r.matches || []).filter(m => m.score > 0.0).map(m => metaToText(m.metadata));
       result.tienda = items.join('\n');
       console.log(`  🏪 Tienda: ${items.length} resultados`);
     } catch (e) {
@@ -188,15 +189,15 @@ setInterval(() => {
 }, 300_000);
 
 // ─── Núcleo IA ───────────────────────────────────────────────
-// Construye el query de búsqueda combinando el mensaje actual con contexto reciente
+// Query limpio: SOLO mensajes del usuario (nunca respuestas del bot)
+// Los últimos 2 del historial + el nuevo mensaje actual
 function buildSearchQuery(messages, newMessage) {
-  // Toma los últimos 2 turnos + el mensaje nuevo para que el RAG tenga contexto
-  const recent = messages
-    .slice(-4)
-    .map(m => m.content)
-    .concat(newMessage)
-    .join(' ');
-  return recent.slice(0, 500); // limita longitud del embedding
+  const prevUserMsgs = messages
+    .filter(m => m.role === 'user')
+    .slice(-2)
+    .map(m => m.content);
+
+  return [...prevUserMsgs, newMessage].join(' ').slice(0, 150);
 }
 
 async function processMessage(senderId, userText) {
@@ -342,20 +343,31 @@ app.post('/webhook', (req, res) => {
   }
 });
 
-// Debug: test de conexión y RAG en vivo
+// Debug: test RAG completo — muestra scores reales y metadata cruda
+// Uso: GET /test-rag?q=limonero
 app.get('/test-rag', async (req, res) => {
-  const query = req.query.q || 'tomatera cherry';
+  const query = req.query.q || 'limonero';
   try {
-    const catalog = await retrieveCatalog(query);
+    const vector = await embed(query);
+
+    const webRaw    = idxWeb    ? await idxWeb.query({ vector, topK: 5, includeMetadata: true })    : { matches: [] };
+    const tiendaRaw = idxTienda ? await idxTienda.query({ vector, topK: 5, includeMetadata: true }) : { matches: [] };
+
+    const fmt = (matches) => (matches || []).map(m => ({
+      score: m.score?.toFixed(4),
+      metadata: m.metadata,
+    }));
+
     res.json({
       query,
-      web_results:    catalog.web    ? catalog.web.split('\n').length    : 0,
-      tienda_results: catalog.tienda ? catalog.tienda.split('\n').length : 0,
-      web_sample:    catalog.web.slice(0, 500),
-      tienda_sample: catalog.tienda.slice(0, 300),
+      embed_dims:   vector.length,
+      web_count:    webRaw.matches?.length || 0,
+      tienda_count: tiendaRaw.matches?.length || 0,
+      web:    fmt(webRaw.matches),
+      tienda: fmt(tiendaRaw.matches),
     });
   } catch (e) {
-    res.json({ error: e.message });
+    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0, 5) });
   }
 });
 
