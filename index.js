@@ -1,6 +1,6 @@
 // ============================================================
-//  PlantasdeHuerto Instagram Bot — v2.0
-//  Arquitectura limpia | RAG real | Comportamiento humano
+//  PlantasdeHuerto Instagram Bot — v3.0
+//  DMs + Comentarios con Vision + RAG real
 // ============================================================
 
 require('dotenv').config();
@@ -18,16 +18,18 @@ const {
   PINECONE_INDEX_WEB    = 'huertoia-instagram',
   PINECONE_INDEX_TIENDA = 'huertoia-tiendafisica',
   PORT = 3000,
-  REPLY_DELAY_MS = 8000,   // pausa natural antes de responder
-  CONVERSATION_TTL_MS = 7200000, // 2h inactividad limpia la conv
+  REPLY_DELAY_MS = 8000,
+  CONVERSATION_TTL_MS = 7200000,
 } = process.env;
 
-const MAX_MSG_LENGTH   = 980;   // Instagram DM hard limit ~1000
-const TOP_K_WEB        = 10;
-const TOP_K_TIENDA     = 8;
-const EMBED_DIMS       = 512;
-const EMBED_MODEL      = 'text-embedding-3-small';
-const CHAT_MODEL       = 'gpt-4o-mini';
+const MAX_MSG_LENGTH = 980;
+const TOP_K_WEB      = 10;
+const TOP_K_TIENDA   = 8;
+const EMBED_DIMS     = 512;
+const EMBED_MODEL    = 'text-embedding-3-small';
+const CHAT_MODEL     = 'gpt-4o-mini';
+const VISION_MODEL   = 'gpt-4o';              // Vision para leer imágenes de posts
+const IG_GRAPH       = 'https://graph.instagram.com/v21.0';
 
 // ─── Clientes ────────────────────────────────────────────────
 const app    = express();
@@ -39,7 +41,7 @@ let idxWeb    = null;
 let idxTienda = null;
 
 if (PINECONE_API_KEY) {
-  const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
+  const pc  = new Pinecone({ apiKey: PINECONE_API_KEY });
   idxWeb    = pc.Index(PINECONE_INDEX_WEB).namespace('articulos');
   idxTienda = pc.Index(PINECONE_INDEX_TIENDA).namespace('tiendafisica');
   console.log(`✅ Pinecone: web="${PINECONE_INDEX_WEB}" tienda="${PINECONE_INDEX_TIENDA}"`);
@@ -47,9 +49,10 @@ if (PINECONE_API_KEY) {
   console.warn('⚠️  PINECONE_API_KEY no definida');
 }
 
-// ─── System Prompt con placeholder ───────────────────────────
-// {{CATALOGO_WEB}} y {{CATALOGO_TIENDA}} se reemplazan en runtime
-const SYSTEM_PROMPT_TEMPLATE = `Eres un asesor de ventas experto de PlantasdeHuerto.com, el vivero online del Huerto Deitana (Totana, Murcia).
+// ─── System Prompts ──────────────────────────────────────────
+
+// Para DMs — conversación larga y detallada
+const DM_PROMPT_TEMPLATE = `Eres un asesor de ventas experto de PlantasdeHuerto.com, el vivero online del Huerto Deitana (Totana, Murcia).
 Hablas con clientes por Instagram de forma natural, cercana y humana — NUNCA como un bot o un catálogo.
 
 DATOS DE CONTACTO: 968 422 335 | info@plantasdehuerto.com | Totana, Murcia
@@ -89,140 +92,56 @@ CÓMO ACTUAR
    - Conecta lo que el cliente dijo antes con lo nuevo.
    - Si antes mencionó "planto en terraza", úsalo al recomendar.
 
-5. CIERRE NATURAL
-   - Cuando el cliente esté decidido, ayúdale a completar: "¿Lo pedimos ya por la web o prefieres pasarte por Totana?"
-   - No dejes ninguna conversación sin una llamada a la acción clara.
+5. ENVÍOS Y LOGÍSTICA
+   - España peninsular e Islas Baleares: envíos disponibles.
+   - Solo enviamos a Portugal en Europa.
+   - Envío gratuito a partir de 70€. Coste estándar: 9,90€.
+   - Plazo: 1 día preparación + 24/48h entrega.
+   - No se aceptan devoluciones. Reclamaciones en 1 semana.
+
+6. CIERRE NATURAL
+   - Cuando el cliente esté decidido: "¿Lo pedimos ya por la web o prefieres pasarte por Totana?"
 
 NUNCA:
 - Inventes productos o precios que no están en el catálogo inyectado.
 - Uses el mismo formato de respuesta siempre.
 - Olvides mencionar la tienda física cuando tengas stock allí.
-- Seas frío, genérico o robótico.
+- Seas frío, genérico o robótico.`;
 
-═══════════════════════════════════════════════
-PRODUCTO ESTRELLA: CIPRES COMUN en Cepellon (Cupressus Sempervirens)
-═══════════════════════════════════════════════
-Cuando pregunten por ciprés, setos, vallas o cortavientos, prioriza y destaca este producto si buscar_productos lo devuelve:
-- Nombre: CIPRÉS COMÚN EN CEPELLÓN (Cupressus sempervirens), cipres para vallar. Ref: 00023045.
-- Precio: 0,44 €/ud (IVA incl.). PEDIDO MÍNIMO 9 UNIDADES.
-- Planta: 40-65 cm aprox., en cepellón. Nombre común: ciprés común o ciprés mediterráneo.
-- Uso: el más utilizado para vallar y hacer setos; ramas en vertical (menos poda); cortavientos; crecimiento rápido los primeros años.
-- Árbol adulto: puede alcanzar 30 m de talla, porte columnar o piramidal; tolera suelos pobres; madera pesada y duradera; longevidad 500+ años.
-- Cuidados: riego bajo. Recién plantados regar hasta que arraiguen; adultos no regar salvo verano muy seco (no regar en exceso, enferma).
-- Plantación: 25-33 cm entre plantas (3-4 por metro lineal). Crecimiento anual aprox. 30 cm.
-- Envío: sin bandeja, tumbados en cajas. Las plantas pueden variar en forma, color y tamaño (son seres vivos).
-Menciona que es vuestro producto estrella para setos y vallas cuando sea relevante. Los datos concretos (precio, stock, URL) los tomas SIEMPRE del resultado de buscar_productos.
+// Para comentarios públicos — respuesta corta, invita a DM
+const COMMENT_PROMPT_TEMPLATE = `Eres el asesor de ventas de PlantasdeHuerto.com (vivero Huerto Deitana, Totana, Murcia).
+Estás respondiendo un comentario PÚBLICO en Instagram — sé breve, natural y amigable.
 
-══════════════════════════════════════════════════════════════════
-FLUJO: CONVERSACIÓN PRIMERO, BÚSQUEDA DESPUÉS (MUY IMPORTANTE)
-══════════════════════════════════════════════════════════════════
-NO actúes como un bot que dispara búsquedas ante cualquier mención de "huerto" o "plantas". Piensa y conversa antes de buscar.
+════════════════════════════════════════
+CONTEXTO DEL POST QUE COMENTARON
+════════════════════════════════════════
+{{CONTEXTO_POST}}
 
-CUANDO NO DEBES LLAMAR A buscar_productos (preguntas abiertas):
-- "Qué me aconsejas para un huerto", "qué plantas hortícolas tenéis", "quiero hacer un huerto, qué me recomendáis", "qué tenéis para empezar".
-En estos casos: NO busques todavía. Responde como asesor:
-  - Pregunta qué quiere cultivar (tomate, lechuga, pimiento, etc.) o si prefiere algo de crecimiento rápido.
-  - Comenta opciones según la temporada o el espacio (maceta vs bancal).
-  - Ofrece buscar en catálogo cuando concrete: "Cuando me digas qué te gustaría cultivar (por ejemplo lechuga, tomate, pimiento) te busco qué tenemos en stock" o "¿Quieres que te busque lechugas, tomates o algo concreto?"
-- Si piden "consejos" o "qué me aconsejas" sin nombrar un producto concreto, da consejos y preguntas; no listes productos hasta que pidan algo específico o acepten que les busques algo concreto.
+════════════════════════════════════════
+CATÁLOGO RELACIONADO
+════════════════════════════════════════
+{{CATALOGO_WEB}}
 
-CUANDO SÍ DEBES LLAMAR A buscar_productos:
-- El usuario nombra un producto o categoría concreta: "tienes limonero", "ciprés para vallar", "búscame tomates", "qué tenéis de lechugas", "sustrato para macetas", "abono para tomate".
-- Después de una vuelta de conversación el usuario concreta: "pues búscame lechugas" o "algo de tomates entonces".
+════════════════════════════════════════
+REGLAS PARA COMENTARIOS PÚBLICOS
+════════════════════════════════════════
 
-Regla: primero conversación y razonamiento; búsqueda solo cuando haya algo concreto que buscar.
+1. MÁXIMO 2-3 líneas — es un comentario público, no un DM.
+2. Si preguntan por precio o disponibilidad → da un dato breve y di "Te mando info por DM 🌿"
+3. Si es un halago → agradece con calidez y ofrece ayuda.
+4. Si preguntan algo específico del producto del post → responde con los datos del catálogo.
+5. Siempre termina invitando a continuar por DM si la pregunta es compleja.
+6. NUNCA inventes precios ni productos.
+7. Tono: cercano, humano, como si fuera una persona real del vivero.
 
-BÚSQUEDA (cuando corresponda): Cuando el usuario pida algo CONCRETO por nombre, referencia o tipo (ej. "cipres", "limonero", "sustrato", "lechuga", "tomate"), llama a "buscar_productos" con ese término. NUNCA recomiendes productos de memoria ni inventes referencias o precios: solo los que devuelva buscar_productos existen en web y están disponibles.
-- El backend normaliza acentos: "cipres" y "ciprés" encuentran lo mismo.
-- Si no hay resultados, puedes llamar con un término más amplio (ej. "seto" si "valla" no devuelve nada).
-buscar_productos devuelve solo artículos activos y con stock > 0. Los precios son con IVA incluido; muéstralos tal cual.
-
-═══════════════════════════════════════════════
-DESCRIPCIÓN Y RAZONAMIENTO (MUY IMPORTANTE)
-═══════════════════════════════════════════════
-Cada producto incluye un 7º valor: la DESCRIPCIÓN (description_short o description del artículo). Es la ÚNICA fuente de verdad sobre qué es el producto.
-
-NUNCA INVENTES DATOS: Cualquier dato factual (altura, talla, distancia de plantación, riego, uso concreto, para qué planta sirve) debe salir EXCLUSIVAMENTE de la descripción que devuelve buscar_productos.
-- Si la descripción dice "puede alcanzar 30 m de talla", di 30 m; NUNCA digas "15-25 m" u otro rango inventado.
-- Si la descripción dice "fungicida para enfermedades de rosales" o "para rosales", di explícitamente que es para rosales.
-- Si la descripción indica cuadro de plantación, riego, crecimiento anual, etc., usa esos datos; si no aparecen, no los inventes.
-
-- USA SIEMPRE la descripción para razonar: no asumas solo por el nombre. Ejemplo: "Centro con Cactus Variados" puede ser un combo (cactus + sustrato), no solo un sustrato; si el cliente pide "sustrato", recomienda productos cuya descripción indique que son sustrato, perlita, compost, etc.
-- Recomienda en función de lo que dice la descripción (uso, tipo de planta, características), no solo del nombre.
-- Si un producto es combo o kit, dilo con naturalidad según la descripción (ej. "Es un pack que incluye...").
-- Mantén el contexto de la conversación: si el cliente pidió algo para una valla, recomienda en función de setos/arbustos y de lo que digan las descripciones.
-
-AL PRESENTAR CADA PRODUCTO: Indica brevemente QUÉ ES o PARA QUÉ SIRVE según la descripción, no solo el nombre comercial.
-- Ejemplo: si el nombre es "ENFERMEDADES RO..." y la descripción dice que es fungicida para rosales, escribe algo como "Fungicida para enfermedades de rosales" antes o junto a la card.
-- Ejemplo: si preguntan "a qué altura crece el ciprés común", responde con los datos exactos de la descripción (ej. "puede alcanzar 30 m de talla", "porte columnar o piramidal", "se usa en setos y como cortavientos").
-
-═══════════════════════════════════════════════
-📦 MÓDULO: ENVÍOS Y LOGÍSTICA
-═══════════════════════════════════════════════
-
-
-La siguiente información es normativa interna de la tienda.
-El asistente debe responder siempre basándose exclusivamente en estos datos.
-
-🌍 Zonas de envío
-- España peninsular: Sí realizamos envíos
-- Islas Baleares: Sí realizamos envíos
-- Resto de Europa: Solo enviamos a Portugal
-- No realizamos envíos a otros países
-Si el cliente pregunta por otro país, responder de forma clara y educada que actualmente solo se envía a España (península y Baleares) y Portugal.
-
-🚚 Plazos de entrega
-- Preparación del pedido: 1 día
-- Entrega estándar: 24 a 48 horas
-- En temporada alta: puede demorarse 1 día adicional
-Si el cliente pregunta por urgencias, explicar que el plazo habitual es 24/48h tras preparación.
-
-💰 Costes de envío
-- No hay pedido mínimo.
-- Envío gratuito a partir de 70 €.
-- Coste estándar de envío: 9,90 €.
-- Coste internacional (Portugal): informar que puede variar según destino (si no está definido, indicar que se confirma antes del envío).
-Si el pedido supera 70 €, indicar automáticamente que el envío es gratuito.
-
-🌱 Productos especiales
-- Las plantas grandes no tienen condiciones especiales de envío.
-- Los cipreses por bandeja se envían sin bandeja.
-- La venta por unidades no afecta al transporte.
-Si el cliente pregunta por embalaje o logística especial, aclarar que se envían protegidos pero sin bandejas en el caso de cipreses.
-
-📦 Incidencias
-- Retrasos: muy poco frecuentes.
-- Roturas: poco frecuentes.
-- Sustituciones: poco frecuentes.
-- No se aceptan devoluciones.
-Si el cliente pregunta por devoluciones, responder claramente que no se aceptan devoluciones, pero que puede contactar con soporte ante cualquier incidencia.
-
-📞 Gestión de incidencias
-En caso de problema, el asistente debe indicar:
-- Email: info@plantasdehuerto.com
-- Teléfono: 968 422 335
-- Plazo máximo para reclamar: 1 semana desde la recepción del pedido
-
-═══════════════════════════════════════════════
-CONTACTO Y WHATSAPP
-═══════════════════════════════════════════════
-
-Cuando el cliente pida WhatsApp, teléfono o contacto, usa este formato que se mostrará como tarjeta bonita:
-
-[CONTACTO:34968422335:+34968422335:info@plantasdehuerto.com]
-
-O si solo quieres dar el WhatsApp, usa un link normal a wa.me:
-https://wa.me/34968422335
-
-Estos links se convertirán automáticamente en botones bonitos de WhatsApp.
-
-Datos de contacto:
-- WhatsApp/Teléfono: 968 422 335 (con prefijo España: 34968422335)
-- Email: info@plantasdehuerto.com
-- Dirección: Ctra. Mazarrón km 2,4, Totana, Murcia;
-`;
+EJEMPLOS DE BUENAS RESPUESTAS:
+- "¡Claro que sí! El limonero va perfecto en terraza 🍋 Te mando más info por DM"
+- "Gracias! 🌱 Si quieres te cuento más por DM y te ayudo a elegir el mejor"
+- "Sí tenemos! Desde 3,90€ en nuestra web. Escríbenos por DM para ayudarte 🌿"`;
 
 // ─── Helpers ─────────────────────────────────────────────────
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 async function embed(text) {
   const res = await openai.embeddings.create({
     model: EMBED_MODEL,
@@ -240,7 +159,6 @@ function metaToText(meta) {
     .join(' | ');
 }
 
-// Recupera artículos relevantes de ambos índices dado un query
 async function retrieveCatalog(query) {
   const result = { web: '', tienda: '' };
   if (!idxWeb && !idxTienda) return result;
@@ -257,38 +175,155 @@ async function retrieveCatalog(query) {
 
   if (idxWeb) {
     try {
-      const r = await idxWeb.query(queryOpts(TOP_K_WEB));
+      const r      = await idxWeb.query(queryOpts(TOP_K_WEB));
       const scores = (r.matches || []).map(m => m.score?.toFixed(3)).join(', ');
-      const items = (r.matches || []).filter(m => m.score > 0.0).map(m => metaToText(m.metadata));
-      result.web = items.join('\n');
+      const items  = (r.matches || []).filter(m => m.score > 0.0).map(m => metaToText(m.metadata));
+      result.web   = items.join('\n');
       console.log(`  🌐 Web: ${items.length} resultados | scores: [${scores}] | query: "${query}"`);
-    } catch (e) {
-      console.error('❌ Pinecone web:', e.message);
-    }
+    } catch (e) { console.error('❌ Pinecone web:', e.message); }
   }
 
   if (idxTienda) {
     try {
-      const r = await idxTienda.query(queryOpts(TOP_K_TIENDA));
-      const items = (r.matches || []).filter(m => m.score > 0.0).map(m => metaToText(m.metadata));
+      const r       = await idxTienda.query(queryOpts(TOP_K_TIENDA));
+      const items   = (r.matches || []).filter(m => m.score > 0.0).map(m => metaToText(m.metadata));
       result.tienda = items.join('\n');
       console.log(`  🏪 Tienda: ${items.length} resultados`);
-    } catch (e) {
-      console.error('❌ Pinecone tienda:', e.message);
-    }
+    } catch (e) { console.error('❌ Pinecone tienda:', e.message); }
   }
 
   return result;
 }
 
-function buildSystemPrompt(catalogWeb, catalogTienda) {
-  return SYSTEM_PROMPT_TEMPLATE
-    .replace('{{CATALOGO_WEB}}',    catalogWeb    || '(Sin resultados para esta consulta en web.)')
-    .replace('{{CATALOGO_TIENDA}}', catalogTienda || '(Sin resultados para esta consulta en tienda física.)');
+// ─── Obtener contexto del post (caption + Vision) ────────────
+async function getPostContext(mediaId) {
+  try {
+    const r = await axios.get(`${IG_GRAPH}/${mediaId}`, {
+      params: {
+        fields: 'caption,media_url,thumbnail_url,media_type',
+        access_token: ACCESS_TOKEN,
+      },
+    });
+
+    const { caption = '', media_url, thumbnail_url, media_type } = r.data;
+
+    // Para video usamos thumbnail, para imagen usamos media_url
+    const imageUrl = media_type === 'VIDEO' ? thumbnail_url : media_url;
+
+    let visualDescription = '';
+
+    // Mandar imagen a GPT-4o Vision para identificar el producto
+    if (imageUrl) {
+      try {
+        const visionRes = await openai.chat.completions.create({
+          model: VISION_MODEL,
+          max_tokens: 200,
+          messages: [{
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: 'Eres un experto en plantas y viveros. Describe brevemente qué producto o planta aparece en esta imagen de Instagram de un vivero. Sé específico: nombre de la planta si la reconoces, características visuales, presentación (maceta, cepellón, bandeja...). Máximo 3 líneas.',
+              },
+              { type: 'image_url', image_url: { url: imageUrl } },
+            ],
+          }],
+        });
+        visualDescription = visionRes.choices[0].message.content?.trim() || '';
+        console.log(`  👁️  Vision: "${visualDescription.slice(0, 80)}"`);
+      } catch (e) {
+        console.warn('⚠️  Vision falló:', e.message);
+      }
+    }
+
+    const context = [
+      caption           ? `Caption del post: ${caption}` : '',
+      visualDescription ? `Descripción visual: ${visualDescription}` : '',
+    ].filter(Boolean).join('\n');
+
+    return context || 'Sin contexto disponible del post.';
+
+  } catch (e) {
+    console.error('❌ getPostContext:', e.message);
+    return 'No se pudo obtener el contexto del post.';
+  }
 }
 
-// ─── Gestión de conversaciones ───────────────────────────────
-// Estructura: Map<senderId, { messages: [], lastActivity: timestamp }>
+// ─── Responder comentario públicamente ───────────────────────
+async function replyToComment(commentId, text) {
+  try {
+    await axios.post(
+      `${IG_GRAPH}/${commentId}/replies`,
+      { message: text },
+      { params: { access_token: ACCESS_TOKEN } }
+    );
+    console.log(`  💬 Comentario respondido: "${text.slice(0, 60)}"`);
+  } catch (e) {
+    console.error('❌ replyToComment:', e.response?.data || e.message);
+  }
+}
+
+// ─── Enviar DM privado ────────────────────────────────────────
+async function sendPrivateDM(userId, text) {
+  try {
+    await axios.post(
+      `${IG_GRAPH}/me/messages`,
+      { recipient: { id: userId }, message: { text } },
+      { params: { access_token: ACCESS_TOKEN } }
+    );
+    console.log(`  📩 DM privado enviado a ${userId}`);
+  } catch (e) {
+    console.error('❌ sendPrivateDM:', e.response?.data || e.message);
+  }
+}
+
+// ─── Procesar comentario ──────────────────────────────────────
+async function processComment(commentId, mediaId, senderId, commentText) {
+  console.log(`💬 Comentario [${senderId}] en post [${mediaId}]: "${commentText}"`);
+
+  // 1. Obtener contexto del post (caption + visión)
+  const postContext = await getPostContext(mediaId);
+
+  // 2. Buscar en Pinecone con el comentario + contexto del post
+  const searchQuery = `${commentText} ${postContext}`.slice(0, 200);
+  const { web: catalogWeb } = await retrieveCatalog(searchQuery);
+
+  // 3. Construir system prompt para comentario público
+  const systemPrompt = COMMENT_PROMPT_TEMPLATE
+    .replace('{{CONTEXTO_POST}}', postContext)
+    .replace('{{CATALOGO_WEB}}',  catalogWeb || '(Sin resultados en catálogo.)');
+
+  // 4. Generar respuesta pública corta
+  let publicReply;
+  try {
+    const res = await openai.chat.completions.create({
+      model: CHAT_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: commentText },
+      ],
+      max_tokens: 150,
+      temperature: 0.8,
+    });
+    publicReply = res.choices[0].message.content?.trim() || '¡Gracias por tu comentario! 🌱';
+  } catch (e) {
+    console.error('❌ OpenAI comment:', e.message);
+    publicReply = '¡Gracias! Te mando más info por DM 🌿';
+  }
+
+  // 5. Responder comentario públicamente
+  await replyToComment(commentId, publicReply);
+
+  // 6. Si la pregunta parece comercial → también mandar DM privado
+  const isCommercial = /precio|cuánto|cuanto|comprar|quiero|disponible|stock|envío|envio|tienes|hay/i.test(commentText);
+  if (isCommercial && senderId) {
+    await sleep(2000);
+    const dmText = `Hola! Te escribo por tu comentario 🌱\n\nTe cuento más sobre lo que viste en el post — ¿me dices si lo quieres para maceta o para tierra? Así te busco lo que mejor te va.`;
+    await sendPrivateDM(senderId, dmText);
+  }
+}
+
+// ─── Gestión de conversaciones (DMs) ────────────────────────
 const conversations = new Map();
 
 function getConv(senderId) {
@@ -300,7 +335,6 @@ function getConv(senderId) {
   return conv;
 }
 
-// Limpieza periódica de conversaciones inactivas
 setInterval(() => {
   const cutoff = Date.now() - CONVERSATION_TTL_MS;
   for (const [id, conv] of conversations.entries()) {
@@ -311,37 +345,28 @@ setInterval(() => {
   }
 }, 300_000);
 
-// ─── Núcleo IA ───────────────────────────────────────────────
-// Query limpio: SOLO mensajes del usuario (nunca respuestas del bot)
-// Los últimos 2 del historial + el nuevo mensaje actual
 function buildSearchQuery(messages, newMessage) {
   const prevUserMsgs = messages
     .filter(m => m.role === 'user')
     .slice(-2)
     .map(m => m.content);
-
   return [...prevUserMsgs, newMessage].join(' ').slice(0, 150);
 }
 
+// ─── Procesar DM ─────────────────────────────────────────────
 async function processMessage(senderId, userText) {
-  const conv = getConv(senderId);
-
-  // 1. Construir query de búsqueda con contexto acumulado
+  const conv        = getConv(senderId);
   const searchQuery = buildSearchQuery(conv.messages, userText);
 
-  // 2. Recuperar catálogo relevante de Pinecone
   const { web: catalogWeb, tienda: catalogTienda } = await retrieveCatalog(searchQuery);
 
-  // 3. Inyectar catálogo en system prompt
-  const systemPrompt = buildSystemPrompt(catalogWeb, catalogTienda);
+  const systemPrompt = DM_PROMPT_TEMPLATE
+    .replace('{{CATALOGO_WEB}}',    catalogWeb    || '(Sin resultados para esta consulta en web.)')
+    .replace('{{CATALOGO_TIENDA}}', catalogTienda || '(Sin resultados para esta consulta en tienda física.)');
 
-  // 4. Añadir mensaje del usuario al historial
   conv.messages.push({ role: 'user', content: userText });
-
-  // 5. Mantener ventana de contexto razonable (últimos 20 turnos)
   const contextWindow = conv.messages.slice(-20);
 
-  // 6. Llamar a la IA
   let reply;
   try {
     const response = await openai.chat.completions.create({
@@ -351,7 +376,7 @@ async function processMessage(senderId, userText) {
         ...contextWindow,
       ],
       max_tokens: 600,
-      temperature: 0.8,   // más natural/humano
+      temperature: 0.8,
     });
     reply = response.choices[0].message.content?.trim()
       || 'Perdona, no pude procesar bien tu consulta. ¿Me lo explicas de otra forma?';
@@ -360,26 +385,19 @@ async function processMessage(senderId, userText) {
     reply = 'Ups, algo falló en mi parte. ¿Me mandas el mensaje de nuevo?';
   }
 
-  // 7. Guardar respuesta en historial
   conv.messages.push({ role: 'assistant', content: reply });
+  console.log(`💬 DM [${senderId}] → "${userText.slice(0, 60)}"`);
+  console.log(`   ← "${reply.slice(0, 80)}"`);
 
-  console.log(`💬 [${senderId}] → "${userText.slice(0, 60)}..."`);
-  console.log(`   ← "${reply.slice(0, 80)}..."`);
-
-  // 8. Enviar respuesta
   await sendMessage(senderId, reply);
 }
 
-// ─── Envío de mensajes (chunking) ──────────────────────────────
+// ─── Envío de DMs (chunking) ─────────────────────────────────
 async function sendMessage(recipientId, text) {
-  // Divide en chunks respetando palabras completas
   const chunks = [];
   let remaining = text;
   while (remaining.length > 0) {
-    if (remaining.length <= MAX_MSG_LENGTH) {
-      chunks.push(remaining);
-      break;
-    }
+    if (remaining.length <= MAX_MSG_LENGTH) { chunks.push(remaining); break; }
     let cutAt = remaining.lastIndexOf(' ', MAX_MSG_LENGTH);
     if (cutAt < 0) cutAt = MAX_MSG_LENGTH;
     chunks.push(remaining.slice(0, cutAt));
@@ -389,7 +407,7 @@ async function sendMessage(recipientId, text) {
   for (let i = 0; i < chunks.length; i++) {
     try {
       await axios.post(
-        `https://graph.instagram.com/v21.0/me/messages`,
+        `${IG_GRAPH}/me/messages`,
         { recipient: { id: recipientId }, message: { text: chunks[i] } },
         {
           params: { access_token: ACCESS_TOKEN },
@@ -403,20 +421,18 @@ async function sendMessage(recipientId, text) {
   }
 }
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
 // ─── Rutas Express ───────────────────────────────────────────
-app.get('/', (_req, res) => res.send('🌱 PlantasdeHuerto Bot v2 — Online'));
+app.get('/', (_req, res) => res.send('🌱 PlantasdeHuerto Bot v3 — DMs + Comentarios'));
 
 app.get('/privacy', (_req, res) => {
   res.send(`<html><body>
     <h1>Política de Privacidad</h1>
-    <p>Los mensajes se procesan en tiempo real para responder automáticamente y no se almacenan en base de datos permanente.</p>
+    <p>Los mensajes se procesan en tiempo real y no se almacenan permanentemente.</p>
     <p>Contacto: info@plantasdehuerto.com</p>
   </body></html>`);
 });
 
-// Verificación del webhook Instagram
+// Verificación webhook
 app.get('/webhook', (req, res) => {
   const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
@@ -426,36 +442,22 @@ app.get('/webhook', (req, res) => {
   res.sendStatus(403);
 });
 
-// Recepción de mensajes
+// Recepción de eventos — DMs y Comentarios
 app.post('/webhook', (req, res) => {
-  // Responder 200 inmediatamente (Instagram requiere <5s)
   res.sendStatus(200);
 
   const { object, entry = [] } = req.body;
   if (object !== 'instagram') return;
 
   for (const e of entry) {
-    // Formato messaging (DMs estándar)
+
+    // ── DMs ──────────────────────────────────────────────────
     for (const event of (e.messaging || [])) {
       if (event.message && !event.message.is_echo) {
         const senderId = event.sender?.id;
         const text     = event.message?.text?.trim();
         if (senderId && text) {
-          console.log(`📥 [${senderId}]: "${text}"`);
-          (async () => {
-            await sleep(REPLY_DELAY_MS); // pausa humana
-            await processMessage(senderId, text);
-          })();
-        }
-      }
-    }
-    // Formato changes (webhook v2)
-    for (const change of (e.changes || [])) {
-      if (change.field === 'messages') {
-        const senderId = change.value?.sender?.id;
-        const text     = change.value?.message?.text?.trim();
-        if (senderId && text) {
-          console.log(`📥 [${senderId}] (change): "${text}"`);
+          console.log(`📥 DM [${senderId}]: "${text}"`);
           (async () => {
             await sleep(REPLY_DELAY_MS);
             await processMessage(senderId, text);
@@ -463,52 +465,81 @@ app.post('/webhook', (req, res) => {
         }
       }
     }
+
+    // ── Changes (DMs v2 + Comentarios) ───────────────────────
+    for (const change of (e.changes || [])) {
+
+      // DMs formato changes
+      if (change.field === 'messages') {
+        const senderId = change.value?.sender?.id;
+        const text     = change.value?.message?.text?.trim();
+        if (senderId && text) {
+          console.log(`📥 DM(change) [${senderId}]: "${text}"`);
+          (async () => {
+            await sleep(REPLY_DELAY_MS);
+            await processMessage(senderId, text);
+          })();
+        }
+      }
+
+      // Comentarios en posts
+      if (change.field === 'comments') {
+        const val         = change.value;
+        const commentId   = val?.id;
+        const mediaId     = val?.media?.id;
+        const senderId    = val?.from?.id;
+        const commentText = val?.text?.trim();
+
+        // Ignorar comentarios del propio bot para evitar bucles
+        if (val?.from?.username === 'plantasdehuerto') continue;
+        if (!commentId || !mediaId || !commentText) continue;
+
+        console.log(`💬 Comentario recibido en post [${mediaId}]: "${commentText}"`);
+        (async () => {
+          await sleep(REPLY_DELAY_MS);
+          await processComment(commentId, mediaId, senderId, commentText);
+        })();
+      }
+    }
   }
 });
 
-// Debug: test RAG completo — muestra scores reales y metadata cruda
-// Uso: GET /test-rag?q=limonero
+// Test RAG
 app.get('/test-rag', async (req, res) => {
   const query = req.query.q || 'limonero';
   try {
-    const vector = await embed(query);
-
+    const vector    = await embed(query);
     const webRaw    = idxWeb    ? await idxWeb.query({ vector, topK: 5, includeMetadata: true })    : { matches: [] };
     const tiendaRaw = idxTienda ? await idxTienda.query({ vector, topK: 5, includeMetadata: true }) : { matches: [] };
-
-    const fmt = (matches) => (matches || []).map(m => ({
-      score: m.score?.toFixed(4),
-      metadata: m.metadata,
-    }));
-
+    const fmt = (m) => (m || []).map(x => ({ score: x.score?.toFixed(4), metadata: x.metadata }));
     res.json({
-      query,
-      embed_dims:   vector.length,
-      web_count:    webRaw.matches?.length || 0,
+      query, embed_dims: vector.length,
+      web_count: webRaw.matches?.length || 0,
       tienda_count: tiendaRaw.matches?.length || 0,
-      web:    fmt(webRaw.matches),
-      tienda: fmt(tiendaRaw.matches),
+      web: fmt(webRaw.matches), tienda: fmt(tiendaRaw.matches),
     });
   } catch (e) {
-    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0, 5) });
+    res.status(500).json({ error: e.message });
   }
 });
 
 app.get('/test-token', async (_req, res) => {
   try {
-    const r = await axios.get('https://graph.instagram.com/v21.0/me', {
+    const r = await axios.get(`${IG_GRAPH}/me`, {
+      params: { access_token: ACCESS_TOKEN, fields: 'id,name,username' },
+    });
+    const perms = await axios.get(`${IG_GRAPH}/me/permissions`, {
       params: { access_token: ACCESS_TOKEN },
     });
-    res.json({ ok: true, data: r.data });
+    res.json({ ok: true, data: r.data, permissions: perms.data });
   } catch (e) {
     res.json({ error: e.response?.data || e.message });
   }
 });
 
-
 // ─── Start ───────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🌱 PlantasdeHuerto Bot v2.0`);
+  console.log(`\n🌱 PlantasdeHuerto Bot v3.0 — DMs + Comentarios`);
   console.log(`   Puerto:       ${PORT}`);
   console.log(`   OpenAI:       ${OPENAI_API_KEY  ? '✅' : '❌ falta OPENAI_API_KEY'}`);
   console.log(`   Pinecone web: ${idxWeb    ? `✅ ${PINECONE_INDEX_WEB}`    : '❌'}`);
