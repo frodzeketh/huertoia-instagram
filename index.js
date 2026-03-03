@@ -108,36 +108,62 @@ NUNCA:
 - Olvides mencionar la tienda física cuando tengas stock allí.
 - Seas frío, genérico o robótico.`;
 
-// Para comentarios públicos — respuesta corta, invita a DM
+// Para comentarios públicos
 const COMMENT_PROMPT_TEMPLATE = `Eres el asesor de ventas de PlantasdeHuerto.com (vivero Huerto Deitana, Totana, Murcia).
-Estás respondiendo un comentario PÚBLICO en Instagram — sé breve, natural y amigable.
+Estás respondiendo un comentario PÚBLICO en Instagram. Usas toda la información disponible para dar la mejor respuesta posible.
 
 ════════════════════════════════════════
-CONTEXTO DEL POST QUE COMENTARON
+CONTEXTO DEL POST
 ════════════════════════════════════════
 {{CONTEXTO_POST}}
 
 ════════════════════════════════════════
-CATÁLOGO RELACIONADO
+CATÁLOGO RELACIONADO AL POST
 ════════════════════════════════════════
 {{CATALOGO_WEB}}
 
 ════════════════════════════════════════
-REGLAS PARA COMENTARIOS PÚBLICOS
+HISTORIAL DE ESTE USUARIO EN ESTE POST
+════════════════════════════════════════
+{{HISTORIAL_USUARIO}}
+
+════════════════════════════════════════
+CÓMO ACTUAR
 ════════════════════════════════════════
 
-1. MÁXIMO 2-3 líneas — es un comentario público, no un DM.
-2. Si preguntan por precio o disponibilidad → da un dato breve y di "Te mando info por DM 🌿"
-3. Si es un halago → agradece con calidez y ofrece ayuda.
-4. Si preguntan algo específico del producto del post → responde con los datos del catálogo.
-5. Siempre termina invitando a continuar por DM si la pregunta es compleja.
-6. NUNCA inventes precios ni productos.
-7. Tono: cercano, humano, como si fuera una persona real del vivero.
+Eres inteligente — lee el comentario, el contexto del post y el historial, y decide la mejor respuesta.
 
-EJEMPLOS DE BUENAS RESPUESTAS:
-- "¡Claro que sí! El limonero va perfecto en terraza 🍋 Te mando más info por DM"
-- "Gracias! 🌱 Si quieres te cuento más por DM y te ayudo a elegir el mejor"
-- "Sí tenemos! Desde 3,90€ en nuestra web. Escríbenos por DM para ayudarte 🌿"`;
+TIPOS DE COMENTARIOS que puedes encontrar y cómo manejarlos:
+
+1. PREGUNTA DE PRODUCTO O COMPRA
+   → Responde con info breve del catálogo (nombre, precio si lo tienes).
+   → Termina invitando a escribir por privado: "Escríbenos por privado para ayudarte 🌿"
+   → Nunca prometas enviar nada TÚ — es el cliente quien debe escribir.
+
+2. MENCIÓN DE AMIGOS (@usuario)
+   → El post puede ser un sorteo o simplemente etiquetar a alguien.
+   → Lee el contexto del post para entender si es sorteo o no.
+   → Si es sorteo: responde con calidez agradeciendo la participación (ej: "¡Gracias por participar! 🍀").
+   → Si no es sorteo y solo etiquetan: responde brevemente al contexto (ej: "¡Que lo disfruten juntos! 🌱").
+   → Si este usuario ya comentó antes en este post: NO respondas de nuevo, devuelve exactamente la cadena vacía "".
+
+3. HALAGO O COMENTARIO POSITIVO
+   → Agradece con calidez y naturalidad. Breve.
+
+4. PREGUNTA GENERAL SOBRE EL VIVERO
+   → Responde con la info que tengas del post y catálogo.
+   → Invita a escribir por privado para más detalle.
+
+5. COMENTARIO IRRELEVANTE O SPAM
+   → Devuelve exactamente la cadena vacía "". No respondas.
+
+REGLAS INAMOVIBLES:
+- MÁXIMO 2 líneas. Es un comentario público.
+- NUNCA pongas links ni URLs — no funcionan en comentarios de Instagram.
+- NUNCA inventes precios ni productos que no estén en el catálogo.
+- NUNCA digas "te mando" o "te envío" — tú no mandas nada.
+- Si decides no responder → devuelve exactamente "".
+- Tono: humano, cercano, natural. Nunca robótico.`;
 
 // ─── Helpers ─────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -273,9 +299,21 @@ async function replyToComment(commentId, text) {
   }
 }
 
+// Historial de comentarios respondidos por post y usuario
+// Map<mediaId, Map<senderId, count>> — la IA decide qué hacer con este contexto
+const commentHistory = new Map();
+setInterval(() => commentHistory.clear(), 3600000);
+
 // ─── Procesar comentario ──────────────────────────────────────
 async function processComment(commentId, mediaId, senderId, commentText) {
   console.log(`💬 Comentario [${senderId}] en post [${mediaId}]: "${commentText}"`);
+
+  // Registrar historial: cuántas veces ha comentado este usuario en este post
+  if (!commentHistory.has(mediaId)) commentHistory.set(mediaId, new Map());
+  const postHistory = commentHistory.get(mediaId);
+  const prevCount = postHistory.get(senderId) || 0;
+  postHistory.set(senderId, prevCount + 1);
+  const isReturningCommenter = prevCount > 0;
 
   // 1. Obtener contexto del post (caption + visión)
   const postContext = await getPostContext(mediaId);
@@ -284,12 +322,18 @@ async function processComment(commentId, mediaId, senderId, commentText) {
   const searchQuery = `${commentText} ${postContext}`.slice(0, 200);
   const { web: catalogWeb } = await retrieveCatalog(searchQuery);
 
-  // 3. Construir system prompt para comentario público
-  const systemPrompt = COMMENT_PROMPT_TEMPLATE
-    .replace('{{CONTEXTO_POST}}', postContext)
-    .replace('{{CATALOGO_WEB}}',  catalogWeb || '(Sin resultados en catálogo.)');
+  // 3. Construir historial del usuario en este post
+  const historialTexto = isReturningCommenter
+    ? `Este usuario ya ha comentado ${prevCount} vez/veces antes en este post.`
+    : 'Primera vez que este usuario comenta en este post.';
 
-  // 4. Generar respuesta pública corta
+  // 4. Construir system prompt con todo el contexto
+  const systemPrompt = COMMENT_PROMPT_TEMPLATE
+    .replace('{{CONTEXTO_POST}}',     postContext)
+    .replace('{{CATALOGO_WEB}}',      catalogWeb || '(Sin resultados en catálogo.)')
+    .replace('{{HISTORIAL_USUARIO}}', historialTexto);
+
+  // 5. Generar respuesta — la IA decide qué responder (o nada)
   let publicReply;
   try {
     const res = await openai.chat.completions.create({
@@ -301,13 +345,19 @@ async function processComment(commentId, mediaId, senderId, commentText) {
       max_tokens: 150,
       temperature: 0.8,
     });
-    publicReply = res.choices[0].message.content?.trim() || '¡Gracias por tu comentario! 🌱';
+    publicReply = res.choices[0].message.content?.trim() || '';
   } catch (e) {
     console.error('❌ OpenAI comment:', e.message);
-    publicReply = '¡Gracias! Te mando más info por DM 🌿';
+    publicReply = '¡Gracias por tu comentario! 🌱 Escríbenos por privado para ayudarte';
   }
 
-  // 5. Responder comentario públicamente
+  // 6. Si la IA decidió no responder → no hacer nada
+  if (!publicReply) {
+    console.log(`  ⏭️  IA decidió no responder a este comentario`);
+    return;
+  }
+
+  // 7. Responder comentario públicamente
   await replyToComment(commentId, publicReply);
 
 }
