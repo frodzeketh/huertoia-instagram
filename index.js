@@ -157,12 +157,14 @@ TIPOS DE COMENTARIOS que puedes encontrar y cómo manejarlos:
 5. COMENTARIO IRRELEVANTE O SPAM
    → Devuelve exactamente la cadena vacía "". No respondas.
 
-REGLAS INAMOVIBLES:
-- MÁXIMO 2 líneas. Es un comentario público.
+REGLAS INAMOVIBLES — DEBES CUMPLIRLAS SIN EXCEPCIÓN:
+- MÁXIMO 2 líneas. Es un comentario público, no un DM.
 - NUNCA pongas links ni URLs — no funcionan en comentarios de Instagram.
 - NUNCA inventes precios ni productos que no estén en el catálogo.
-- NUNCA digas "te mando" o "te envío" — tú no mandas nada.
-- Si decides no responder → devuelve exactamente "".
+- NUNCA digas "te mando" o "te envío" — tú no mandas nada, es el cliente quien escribe.
+- TODA respuesta comercial DEBE terminar OBLIGATORIAMENTE con "Escríbenos por privado 🌿"
+- Si el HISTORIAL dice que ya respondiste a este usuario en este post → devuelve solo: __SKIP__
+- Si el comentario es spam o irrelevante → devuelve solo: __SKIP__
 - Tono: humano, cercano, natural. Nunca robótico.`;
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -277,6 +279,7 @@ async function getPostContext(mediaId) {
       visualDescription ? `Descripción visual: ${visualDescription}` : '',
     ].filter(Boolean).join('\n');
 
+    console.log(`  📄 Contexto post inyectado: "${context.slice(0, 150)}"`);
     return context || 'Sin contexto disponible del post.';
 
   } catch (e) {
@@ -308,11 +311,10 @@ setInterval(() => commentHistory.clear(), 3600000);
 async function processComment(commentId, mediaId, senderId, commentText) {
   console.log(`💬 Comentario [${senderId}] en post [${mediaId}]: "${commentText}"`);
 
-  // Registrar historial: cuántas veces ha comentado este usuario en este post
-  if (!commentHistory.has(mediaId)) commentHistory.set(mediaId, new Map());
-  const postHistory = commentHistory.get(mediaId);
-  const prevCount = postHistory.get(senderId) || 0;
-  postHistory.set(senderId, prevCount + 1);
+  // Historial: clave mediaId:senderId — cuántas veces respondimos ya
+  const histKey = `${mediaId}:${senderId}`;
+  const prevCount = commentHistory.get(histKey) || 0;
+  commentHistory.set(histKey, prevCount + 1);
   const isReturningCommenter = prevCount > 0;
 
   // 1. Obtener contexto del post (caption + visión)
@@ -352,7 +354,7 @@ async function processComment(commentId, mediaId, senderId, commentText) {
   }
 
   // 6. Si la IA decidió no responder → no hacer nada
-  if (!publicReply) {
+  if (!publicReply || publicReply.includes('__SKIP__')) {
     console.log(`  ⏭️  IA decidió no responder a este comentario`);
     return;
   }
