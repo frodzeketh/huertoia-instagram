@@ -8,6 +8,7 @@ const express = require('express');
 const axios   = require('axios');
 const OpenAI  = require('openai').default;
 const { Pinecone } = require('@pinecone-database/pinecone');
+const { createDirectorClient } = require('./lib/directorBandejaClient');
 
 // ─── Config ─────────────────────────────────────────────────
 const {
@@ -17,7 +18,9 @@ const {
   PINECONE_API_KEY,
   PINECONE_INDEX_WEB    = 'huertoia-instagram',
   PINECONE_INDEX_TIENDA = 'huertoia-tiendafisica',
-  PORT = 3000,
+  DIRECTOR_API_URL,
+  DIRECTOR_API_KEY,
+  PORT = 3001,
   REPLY_DELAY_MS = 8000,
   CONVERSATION_TTL_MS = 7200000,
 } = process.env;
@@ -48,6 +51,16 @@ if (PINECONE_API_KEY) {
 } else {
   console.warn('⚠️  PINECONE_API_KEY no definida');
 }
+
+let director = null;
+if (DIRECTOR_API_URL && DIRECTOR_API_KEY) {
+  director = createDirectorClient(DIRECTOR_API_URL, DIRECTOR_API_KEY);
+  console.log(`✅ Director: ${DIRECTOR_API_URL}`);
+} else {
+  console.warn('⚠️  DIRECTOR_API_URL / DIRECTOR_API_KEY no definidas — bandeja desactivada');
+}
+
+const conversacionIds = new Map(); // senderId → id documento Firestore
 
 // ─── System Prompts ──────────────────────────────────────────
 
@@ -307,8 +320,28 @@ async function replyToComment(commentId, text) {
 const commentHistory = new Map();
 setInterval(() => commentHistory.clear(), 3600000);
 
+// ─── Registrar turno en Firestore vía Director ─────────────────
+async function registrarTurnoEnDirector({ senderId, username, userMessage, botReply }) {
+  if (!director) return;
+
+  try {
+    const reg = await director.registrarTurnoDM({
+      senderId: String(senderId),
+      username: username || '',
+      userMessage,
+      botReply,
+      conversacionId: conversacionIds.get(String(senderId)) || null,
+    });
+    if (reg.conversacionId) {
+      conversacionIds.set(String(senderId), reg.conversacionId);
+    }
+  } catch (err) {
+    console.warn('[firebase/conversaciones]', err.message);
+  }
+}
+
 // ─── Procesar comentario ──────────────────────────────────────
-async function processComment(commentId, mediaId, senderId, commentText) {
+async function processComment(commentId, mediaId, senderId, commentText, username = '') {
   console.log(`💬 Comentario [${senderId}] en post [${mediaId}]: "${commentText}"`);
 
   // Historial: clave mediaId:senderId — cuántas veces respondimos ya
@@ -353,15 +386,27 @@ async function processComment(commentId, mediaId, senderId, commentText) {
     publicReply = '¡Gracias por tu comentario! 🌱 Escríbenos por privado para ayudarte';
   }
 
-  // 6. Si la IA decidió no responder → no hacer nada
+  // 6. Si la IA decidió no responder → registrar igual en Firestore
   if (!publicReply || publicReply.includes('__SKIP__')) {
     console.log(`  ⏭️  IA decidió no responder a este comentario`);
+    await registrarTurnoEnDirector({
+      senderId,
+      username,
+      userMessage: `[COMENTARIO] ${commentText}`,
+      botReply: '(sin respuesta)',
+    });
     return;
   }
 
   // 7. Responder comentario públicamente
   await replyToComment(commentId, publicReply);
 
+  await registrarTurnoEnDirector({
+    senderId,
+    username,
+    userMessage: `[COMENTARIO] ${commentText}`,
+    botReply: publicReply,
+  });
 }
 
 // ─── Gestión de conversaciones (DMs) ────────────────────────
@@ -394,16 +439,17 @@ function buildSearchQuery(messages, newMessage) {
   return [...prevUserMsgs, newMessage].join(' ').slice(0, 150);
 }
 
-// ─── Procesar DM ─────────────────────────────────────────────
-async function processMessage(senderId, userText) {
-  const conv        = getConv(senderId);
-  const searchQuery = buildSearchQuery(conv.messages, userText);
+// ─── Generar respuesta DM (RAG + GPT) ────────────────────────
+async function generateDMReply(senderId, userText, catalog, contextoDirector = '') {
+  const conv = getConv(senderId);
 
-  const { web: catalogWeb, tienda: catalogTienda } = await retrieveCatalog(searchQuery);
+  let systemPrompt = DM_PROMPT_TEMPLATE
+    .replace('{{CATALOGO_WEB}}',    catalog.web    || '(Sin resultados para esta consulta en web.)')
+    .replace('{{CATALOGO_TIENDA}}', catalog.tienda || '(Sin resultados para esta consulta en tienda física.)');
 
-  const systemPrompt = DM_PROMPT_TEMPLATE
-    .replace('{{CATALOGO_WEB}}',    catalogWeb    || '(Sin resultados para esta consulta en web.)')
-    .replace('{{CATALOGO_TIENDA}}', catalogTienda || '(Sin resultados para esta consulta en tienda física.)');
+  if (contextoDirector) {
+    systemPrompt += `\n\n## Instrucciones del Director (prioritarias)\n${contextoDirector}\nInterpreta y actúa con naturalidad. No copies un guion rígido.`;
+  }
 
   conv.messages.push({ role: 'user', content: userText });
   const contextWindow = conv.messages.slice(-20);
@@ -427,10 +473,58 @@ async function processMessage(senderId, userText) {
   }
 
   conv.messages.push({ role: 'assistant', content: reply });
+  return reply;
+}
+
+// ─── Procesar DM ─────────────────────────────────────────────
+async function processMessage(senderId, userText, username = '') {
+  await sleep(REPLY_DELAY_MS);
+
+  let contextoDirector = '';
+  let instrucciones = [];
+
+  if (director) {
+    try {
+      instrucciones = await director.getInstruccionesPendientes({
+        senderId: String(senderId),
+      });
+      if (instrucciones.length) {
+        contextoDirector = instrucciones.map((i) => i.mensaje).join('\n');
+        console.log('[bandeja] Instrucciones del Director:', contextoDirector.slice(0, 80));
+      }
+    } catch (err) {
+      console.warn('[bandeja] Director no disponible:', err.message);
+    }
+  }
+
+  const conv        = getConv(senderId);
+  const searchQuery = buildSearchQuery(conv.messages, userText);
+  const catalog     = await retrieveCatalog(searchQuery);
+  const reply       = await generateDMReply(senderId, userText, catalog, contextoDirector);
+
   console.log(`💬 DM [${senderId}] → "${userText.slice(0, 60)}"`);
   console.log(`   ← "${reply.slice(0, 80)}"`);
 
   await sendMessage(senderId, reply);
+
+  if (director && instrucciones.length) {
+    try {
+      for (const inst of instrucciones) {
+        await director.marcarInstruccionHecha(inst.id, {
+          respuestaDani: reply.slice(0, 300),
+        });
+      }
+    } catch (err) {
+      console.warn('[bandeja] Error marcando instrucciones:', err.message);
+    }
+  }
+
+  await registrarTurnoEnDirector({
+    senderId,
+    username,
+    userMessage: userText,
+    botReply: reply,
+  });
 }
 
 // ─── Envío de DMs (chunking) ─────────────────────────────────
@@ -468,7 +562,7 @@ app.get('/', (_req, res) => res.send('🌱 PlantasdeHuerto Bot v3 — DMs + Come
 app.get('/privacy', (_req, res) => {
   res.send(`<html><body>
     <h1>Política de Privacidad</h1>
-    <p>Los mensajes se procesan en tiempo real y no se almacenan permanentemente.</p>
+    <p>Los mensajes se procesan en tiempo real y se registran en nuestra bandeja interna para atención al cliente.</p>
     <p>Contacto: info@plantasdehuerto.com</p>
   </body></html>`);
 });
@@ -497,12 +591,12 @@ app.post('/webhook', (req, res) => {
       if (event.message && !event.message.is_echo) {
         const senderId = event.sender?.id;
         const text     = event.message?.text?.trim();
+        const username = event.sender?.username || '';
         if (senderId && text) {
           console.log(`📥 DM [${senderId}]: "${text}"`);
-          (async () => {
-            await sleep(REPLY_DELAY_MS);
-            await processMessage(senderId, text);
-          })();
+          processMessage(senderId, text, username).catch((err) =>
+            console.error('❌ processMessage:', err.message)
+          );
         }
       }
     }
@@ -514,12 +608,14 @@ app.post('/webhook', (req, res) => {
       if (change.field === 'messages') {
         const senderId = change.value?.sender?.id;
         const text     = change.value?.message?.text?.trim();
+        const username = change.value?.from?.username
+          || change.value?.sender?.username
+          || '';
         if (senderId && text) {
           console.log(`📥 DM(change) [${senderId}]: "${text}"`);
-          (async () => {
-            await sleep(REPLY_DELAY_MS);
-            await processMessage(senderId, text);
-          })();
+          processMessage(senderId, text, username).catch((err) =>
+            console.error('❌ processMessage:', err.message)
+          );
         }
       }
 
@@ -544,10 +640,11 @@ app.post('/webhook', (req, res) => {
         // El ID de la cuenta propia viene en entry[0].id
         if (senderId === e.id) continue;
 
+        const username = val?.from?.username || '';
         console.log(`💬 Comentario recibido en post [${mediaId}]: "${commentText}"`);
         (async () => {
           await sleep(REPLY_DELAY_MS);
-          await processComment(commentId, mediaId, senderId, commentText);
+          await processComment(commentId, mediaId, senderId, commentText, username);
         })();
       }
     }
@@ -594,5 +691,6 @@ app.listen(PORT, () => {
   console.log(`   OpenAI:       ${OPENAI_API_KEY  ? '✅' : '❌ falta OPENAI_API_KEY'}`);
   console.log(`   Pinecone web: ${idxWeb    ? `✅ ${PINECONE_INDEX_WEB}`    : '❌'}`);
   console.log(`   Pinecone tda: ${idxTienda ? `✅ ${PINECONE_INDEX_TIENDA}` : '❌'}`);
-  console.log(`   Delay:        ${REPLY_DELAY_MS / 1000}s\n`);
+  console.log(`   Delay:        ${REPLY_DELAY_MS / 1000}s`);
+  console.log(`   Director:     ${director ? `✅ ${DIRECTOR_API_URL}` : '❌ bandeja desactivada'}\n`);
 });
