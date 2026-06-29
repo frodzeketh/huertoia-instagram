@@ -9,6 +9,7 @@ const axios   = require('axios');
 const OpenAI  = require('openai').default;
 const { Pinecone } = require('@pinecone-database/pinecone');
 const { createDirectorClient } = require('./lib/directorBandejaClient');
+const { registrarTurnoDM } = require('./lib/conversacionesStorage');
 
 // ─── Config ─────────────────────────────────────────────────
 const {
@@ -320,12 +321,12 @@ async function replyToComment(commentId, text) {
 const commentHistory = new Map();
 setInterval(() => commentHistory.clear(), 3600000);
 
-// ─── Registrar turno en Firestore vía Director ─────────────────
-async function registrarTurnoEnDirector({ senderId, username, userMessage, botReply }) {
-  if (!director) return;
+// ─── Registrar turno en Firestore (directo) ──────────────────
+async function guardarTurnoEnFirestore({ senderId, username, userMessage, botReply }) {
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT?.trim()) return;
 
   try {
-    const reg = await director.registrarTurnoDM({
+    const reg = await registrarTurnoDM({
       senderId: String(senderId),
       username: username || '',
       userMessage,
@@ -334,9 +335,10 @@ async function registrarTurnoEnDirector({ senderId, username, userMessage, botRe
     });
     if (reg.conversacionId) {
       conversacionIds.set(String(senderId), reg.conversacionId);
+      console.log(`[conversaciones] Guardado en Firestore: ${reg.conversacionId}`);
     }
   } catch (err) {
-    console.warn('[firebase/conversaciones]', err.message);
+    console.error('[conversaciones] Error guardando en Firestore:', err.message);
   }
 }
 
@@ -389,7 +391,7 @@ async function processComment(commentId, mediaId, senderId, commentText, usernam
   // 6. Si la IA decidió no responder → registrar igual en Firestore
   if (!publicReply || publicReply.includes('__SKIP__')) {
     console.log(`  ⏭️  IA decidió no responder a este comentario`);
-    await registrarTurnoEnDirector({
+    await guardarTurnoEnFirestore({
       senderId,
       username,
       userMessage: `[COMENTARIO] ${commentText}`,
@@ -401,7 +403,7 @@ async function processComment(commentId, mediaId, senderId, commentText, usernam
   // 7. Responder comentario públicamente
   await replyToComment(commentId, publicReply);
 
-  await registrarTurnoEnDirector({
+  await guardarTurnoEnFirestore({
     senderId,
     username,
     userMessage: `[COMENTARIO] ${commentText}`,
@@ -519,7 +521,7 @@ async function processMessage(senderId, userText, username = '') {
     }
   }
 
-  await registrarTurnoEnDirector({
+  await guardarTurnoEnFirestore({
     senderId,
     username,
     userMessage: userText,
@@ -692,5 +694,6 @@ app.listen(PORT, () => {
   console.log(`   Pinecone web: ${idxWeb    ? `✅ ${PINECONE_INDEX_WEB}`    : '❌'}`);
   console.log(`   Pinecone tda: ${idxTienda ? `✅ ${PINECONE_INDEX_TIENDA}` : '❌'}`);
   console.log(`   Delay:        ${REPLY_DELAY_MS / 1000}s`);
-  console.log(`   Director:     ${director ? `✅ ${DIRECTOR_API_URL}` : '❌ bandeja desactivada'}\n`);
+  console.log(`   Firestore:    ${process.env.FIREBASE_SERVICE_ACCOUNT ? '✅ director-ia-m' : '❌ falta FIREBASE_SERVICE_ACCOUNT'}`);
+  console.log(`   Director:     ${director ? `✅ instrucciones (${DIRECTOR_API_URL})` : '— instrucciones desactivadas'}\n`);
 });
