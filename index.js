@@ -335,10 +335,10 @@ async function guardarTurnoEnFirestore({ senderId, username, userMessage, botRep
     });
     if (reg.conversacionId) {
       conversacionIds.set(String(senderId), reg.conversacionId);
-      console.log(`[conversaciones] Guardado en Firestore: ${reg.conversacionId}`);
+      console.log(`[conversations-instagram] Guardado: ${reg.conversacionId}`);
     }
   } catch (err) {
-    console.error('[conversaciones] Error guardando en Firestore:', err.message);
+    console.error('[conversations-instagram] Error:', err.message);
   }
 }
 
