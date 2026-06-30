@@ -11,6 +11,7 @@ const { Pinecone } = require('@pinecone-database/pinecone');
 const { createDirectorClient } = require('./lib/directorBandejaClient');
 const { registrarTurnoDM, hasFirebaseConfig, pingFirestore } = require('./lib/conversacionesStorage');
 
+
 // ─── Config ─────────────────────────────────────────────────
 const {
   VERIFY_TOKEN,
