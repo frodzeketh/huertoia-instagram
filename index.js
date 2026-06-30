@@ -9,7 +9,7 @@ const axios   = require('axios');
 const OpenAI  = require('openai').default;
 const { Pinecone } = require('@pinecone-database/pinecone');
 const { createDirectorClient } = require('./lib/directorBandejaClient');
-const { registrarTurnoDM } = require('./lib/conversacionesStorage');
+const { registrarTurnoDM, hasFirebaseConfig, pingFirestore } = require('./lib/conversacionesStorage');
 
 // ─── Config ─────────────────────────────────────────────────
 const {
@@ -184,6 +184,40 @@ REGLAS INAMOVIBLES — DEBES CUMPLIRLAS SIN EXCEPCIÓN:
 // ─── Helpers ─────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+const profileCache = new Map(); // senderId → { name, username }
+
+async function fetchInstagramProfile(senderId) {
+  const key = String(senderId);
+  if (profileCache.has(key)) return profileCache.get(key);
+
+  try {
+    const r = await axios.get(`${IG_GRAPH}/${key}`, {
+      params: { fields: 'name,username', access_token: ACCESS_TOKEN },
+    });
+    const profile = {
+      name: r.data.name?.trim() || '',
+      username: r.data.username?.replace(/^@/, '').trim() || '',
+    };
+    profileCache.set(key, profile);
+    if (profile.name || profile.username) {
+      console.log(`[profile] ${key} → ${profile.name || '?'} @${profile.username || '?'}`);
+    }
+    return profile;
+  } catch (e) {
+    const msg = e.response?.data?.error?.message || e.message;
+    console.warn(`[profile] No perfil para ${key}: ${msg}`);
+    const empty = { name: '', username: '' };
+    profileCache.set(key, empty);
+    return empty;
+  }
+}
+
+function mergeProfile(webhookUsername, profile) {
+  const username = (webhookUsername || profile.username || '').replace(/^@/, '').trim();
+  const name = profile.name || '';
+  return { username, name };
+}
+
 async function embed(text) {
   const res = await openai.embeddings.create({
     model: EMBED_MODEL,
@@ -322,13 +356,17 @@ const commentHistory = new Map();
 setInterval(() => commentHistory.clear(), 3600000);
 
 // ─── Registrar turno en Firestore (directo) ──────────────────
-async function guardarTurnoEnFirestore({ senderId, username, userMessage, botReply }) {
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT?.trim()) return;
+async function guardarTurnoEnFirestore({ senderId, username, name, userMessage, botReply }) {
+  if (!hasFirebaseConfig()) {
+    console.warn('[conversations-instagram] Sin FIREBASE_SERVICE_ACCOUNT — no se guarda');
+    return;
+  }
 
   try {
     const reg = await registrarTurnoDM({
       senderId: String(senderId),
       username: username || '',
+      name: name || '',
       userMessage,
       botReply,
       conversacionId: conversacionIds.get(String(senderId)) || null,
@@ -338,13 +376,16 @@ async function guardarTurnoEnFirestore({ senderId, username, userMessage, botRep
       console.log(`[conversations-instagram] Guardado: ${reg.conversacionId}`);
     }
   } catch (err) {
-    console.error('[conversations-instagram] Error:', err.message);
+    console.error('[conversations-instagram] Error:', err.message, err.code || '');
   }
 }
 
 // ─── Procesar comentario ──────────────────────────────────────
-async function processComment(commentId, mediaId, senderId, commentText, username = '') {
+async function processComment(commentId, mediaId, senderId, commentText, usernameFromWebhook = '') {
   console.log(`💬 Comentario [${senderId}] en post [${mediaId}]: "${commentText}"`);
+
+  const profile = await fetchInstagramProfile(senderId);
+  const { username, name } = mergeProfile(usernameFromWebhook, profile);
 
   // Historial: clave mediaId:senderId — cuántas veces respondimos ya
   const histKey = `${mediaId}:${senderId}`;
@@ -394,6 +435,7 @@ async function processComment(commentId, mediaId, senderId, commentText, usernam
     await guardarTurnoEnFirestore({
       senderId,
       username,
+      name,
       userMessage: `[COMENTARIO] ${commentText}`,
       botReply: '(sin respuesta)',
     });
@@ -406,6 +448,7 @@ async function processComment(commentId, mediaId, senderId, commentText, usernam
   await guardarTurnoEnFirestore({
     senderId,
     username,
+    name,
     userMessage: `[COMENTARIO] ${commentText}`,
     botReply: publicReply,
   });
@@ -479,8 +522,11 @@ async function generateDMReply(senderId, userText, catalog, contextoDirector = '
 }
 
 // ─── Procesar DM ─────────────────────────────────────────────
-async function processMessage(senderId, userText, username = '') {
+async function processMessage(senderId, userText, usernameFromWebhook = '') {
   await sleep(REPLY_DELAY_MS);
+
+  const profile = await fetchInstagramProfile(senderId);
+  const { username, name } = mergeProfile(usernameFromWebhook, profile);
 
   let contextoDirector = '';
   let instrucciones = [];
@@ -524,6 +570,7 @@ async function processMessage(senderId, userText, username = '') {
   await guardarTurnoEnFirestore({
     senderId,
     username,
+    name,
     userMessage: userText,
     botReply: reply,
   });
@@ -686,14 +733,49 @@ app.get('/test-token', async (_req, res) => {
   }
 });
 
+app.get('/test-firestore', async (_req, res) => {
+  if (!hasFirebaseConfig()) {
+    return res.status(500).json({
+      ok: false,
+      error: 'Falta FIREBASE_SERVICE_ACCOUNT o FIREBASE_SERVICE_ACCOUNT_BASE64 en variables de entorno',
+      hint: 'En Railway usa FIREBASE_SERVICE_ACCOUNT_BASE64 (npm run firebase:b64)',
+    });
+  }
+
+  try {
+    const ping = await pingFirestore();
+    const reg = await registrarTurnoDM({
+      senderId: 'railway-test',
+      username: 'railway_test',
+      userMessage: 'test ping desde Railway',
+      botReply: 'ok firestore',
+      conversacionId: null,
+    });
+    res.json({ ok: true, ...ping, testConversacionId: reg.conversacionId });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, code: e.code || null });
+  }
+});
+
 // ─── Start ───────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`\n🌱 PlantasdeHuerto Bot v3.0 — DMs + Comentarios`);
   console.log(`   Puerto:       ${PORT}`);
   console.log(`   OpenAI:       ${OPENAI_API_KEY  ? '✅' : '❌ falta OPENAI_API_KEY'}`);
   console.log(`   Pinecone web: ${idxWeb    ? `✅ ${PINECONE_INDEX_WEB}`    : '❌'}`);
   console.log(`   Pinecone tda: ${idxTienda ? `✅ ${PINECONE_INDEX_TIENDA}` : '❌'}`);
   console.log(`   Delay:        ${REPLY_DELAY_MS / 1000}s`);
-  console.log(`   Firestore:    ${process.env.FIREBASE_SERVICE_ACCOUNT ? '✅ director-ia-m' : '❌ falta FIREBASE_SERVICE_ACCOUNT'}`);
+
+  if (!hasFirebaseConfig()) {
+    console.log('   Firestore:    ❌ falta FIREBASE_SERVICE_ACCOUNT (o _BASE64)');
+  } else {
+    try {
+      const ping = await pingFirestore();
+      console.log(`   Firestore:    ✅ ${ping.project} → ${ping.collection}`);
+    } catch (e) {
+      console.log(`   Firestore:    ❌ ${e.message}`);
+    }
+  }
+
   console.log(`   Director:     ${director ? `✅ instrucciones (${DIRECTOR_API_URL})` : '— instrucciones desactivadas'}\n`);
 });
