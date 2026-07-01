@@ -22,10 +22,15 @@ const {
   PINECONE_INDEX_TIENDA = 'huertoia-tiendafisica',
   DIRECTOR_API_URL,
   DIRECTOR_API_KEY,
-  PORT = 3001,
   REPLY_DELAY_MS = 8000,
   CONVERSATION_TTL_MS = 7200000,
 } = process.env;
+
+const PORT = Number(process.env.PORT) || 3001;
+const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT;
+const PUBLIC_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : null;
 
 const MAX_MSG_LENGTH = 980;
 const TOP_K_WEB      = 10;
@@ -56,10 +61,15 @@ if (PINECONE_API_KEY) {
 
 let director = null;
 if (DIRECTOR_API_URL && DIRECTOR_API_KEY) {
-  director = createDirectorClient(DIRECTOR_API_URL, DIRECTOR_API_KEY);
-  console.log(`✅ Director: ${DIRECTOR_API_URL}`);
+  const isLocalDirector = /localhost|127\.0\.0\.1/.test(DIRECTOR_API_URL);
+  if (IS_RAILWAY && isLocalDirector) {
+    console.warn('⚠️  DIRECTOR_API_URL=localhost ignorado en Railway (usa URL pública del Director o quítalo)');
+  } else {
+    director = createDirectorClient(DIRECTOR_API_URL, DIRECTOR_API_KEY);
+    console.log(`✅ Director: ${DIRECTOR_API_URL}`);
+  }
 } else {
-  console.warn('⚠️  DIRECTOR_API_URL / DIRECTOR_API_KEY no definidas — bandeja desactivada');
+  console.warn('⚠️  DIRECTOR_API_URL / DIRECTOR_API_KEY no definidas — instrucciones desactivadas');
 }
 
 const conversacionIds = new Map(); // senderId → id documento Firestore
@@ -609,6 +619,27 @@ async function sendMessage(recipientId, text) {
 // ─── Rutas Express ───────────────────────────────────────────
 app.get('/', (_req, res) => res.send('🌱 PlantasdeHuerto Bot v3 — DMs + Comentarios'));
 
+app.get('/health', (_req, res) => {
+  res.json({
+    ok: true,
+    railway: IS_RAILWAY,
+    publicUrl: PUBLIC_URL,
+    webhookUrl: PUBLIC_URL ? `${PUBLIC_URL}/webhook` : null,
+    port: PORT,
+    instagram: { accessToken: !!ACCESS_TOKEN, verifyToken: !!VERIFY_TOKEN },
+    openai: !!OPENAI_API_KEY,
+    pinecone: !!PINECONE_API_KEY,
+    firestore: hasFirebaseConfig(),
+    director: director ? DIRECTOR_API_URL : null,
+    tests: PUBLIC_URL
+      ? {
+          firestore: `${PUBLIC_URL}/test-firestore`,
+          token: `${PUBLIC_URL}/test-token`,
+        }
+      : null,
+  });
+});
+
 app.get('/privacy', (_req, res) => {
   res.send(`<html><body>
     <h1>Política de Privacidad</h1>
@@ -632,7 +663,12 @@ app.post('/webhook', (req, res) => {
   res.sendStatus(200);
 
   const { object, entry = [] } = req.body;
-  if (object !== 'instagram') return;
+  console.log(`📨 Webhook POST object="${object}" entries=${entry.length}`);
+
+  if (object !== 'instagram') {
+    console.warn(`⚠️  Webhook ignorado — object="${object}" (esperado "instagram")`);
+    return;
+  }
 
   for (const e of entry) {
 
@@ -761,7 +797,10 @@ app.get('/test-firestore', async (_req, res) => {
 // ─── Start ───────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log(`\n🌱 PlantasdeHuerto Bot v3.0 — DMs + Comentarios`);
-  console.log(`   Puerto:       ${PORT}`);
+  console.log(`   Puerto:       ${PORT}${IS_RAILWAY ? ' (Railway)' : ''}`);
+  if (PUBLIC_URL) console.log(`   URL pública:  ${PUBLIC_URL}`);
+  if (PUBLIC_URL) console.log(`   Webhook Meta: ${PUBLIC_URL}/webhook`);
+  console.log(`   Instagram:    ${ACCESS_TOKEN ? '✅ ACCESS_TOKEN' : '❌ falta ACCESS_TOKEN'} | ${VERIFY_TOKEN ? '✅ VERIFY_TOKEN' : '❌ falta VERIFY_TOKEN'}`);
   console.log(`   OpenAI:       ${OPENAI_API_KEY  ? '✅' : '❌ falta OPENAI_API_KEY'}`);
   console.log(`   Pinecone web: ${idxWeb    ? `✅ ${PINECONE_INDEX_WEB}`    : '❌'}`);
   console.log(`   Pinecone tda: ${idxTienda ? `✅ ${PINECONE_INDEX_TIENDA}` : '❌'}`);
@@ -778,5 +817,15 @@ app.listen(PORT, async () => {
     }
   }
 
-  console.log(`   Director:     ${director ? `✅ instrucciones (${DIRECTOR_API_URL})` : '— instrucciones desactivadas'}\n`);
+  if (IS_RAILWAY && DIRECTOR_API_URL && /localhost|127\.0\.0\.1/.test(DIRECTOR_API_URL)) {
+    console.log('   Director:     ⚠️  localhost ignorado en Railway');
+  } else {
+    console.log(`   Director:     ${director ? `✅ instrucciones (${DIRECTOR_API_URL})` : '— instrucciones desactivadas'}`);
+  }
+
+  if (IS_RAILWAY && process.env.PORT === '3001') {
+    console.log('   ⚠️  Quita PORT=3001 de Railway Variables — deja que Railway asigne el puerto');
+  }
+
+  console.log(`   Diagnóstico:  ${PUBLIC_URL ? `${PUBLIC_URL}/health` : `http://localhost:${PORT}/health`}\n`);
 });
