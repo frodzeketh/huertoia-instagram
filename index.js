@@ -795,7 +795,14 @@ app.get('/test-firestore', async (_req, res) => {
 });
 
 // ─── Start ───────────────────────────────────────────────────
-app.listen(PORT, async () => {
+process.on('unhandledRejection', (err) => {
+  console.error('❌ unhandledRejection:', err?.message || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('❌ uncaughtException:', err?.message || err);
+});
+
+async function runStartupDiagnostics() {
   console.log(`\n🌱 PlantasdeHuerto Bot v3.0 — DMs + Comentarios`);
   console.log(`   Puerto:       ${PORT}${IS_RAILWAY ? ' (Railway)' : ''}`);
   if (PUBLIC_URL) console.log(`   URL pública:  ${PUBLIC_URL}`);
@@ -823,9 +830,10 @@ app.listen(PORT, async () => {
     console.log(`   Director:     ${director ? `✅ instrucciones (${DIRECTOR_API_URL})` : '— instrucciones desactivadas'}`);
   }
 
-  if (IS_RAILWAY && process.env.PORT === '3001') {
-    console.log('   ⚠️  Quita PORT=3001 de Railway Variables — deja que Railway asigne el puerto');
-  }
-
   console.log(`   Diagnóstico:  ${PUBLIC_URL ? `${PUBLIC_URL}/health` : `http://localhost:${PORT}/health`}\n`);
+}
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ HTTP listo en 0.0.0.0:${PORT}`);
+  runStartupDiagnostics().catch((err) => console.error('❌ startup diagnostics:', err.message));
 });
