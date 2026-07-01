@@ -45,6 +45,11 @@ const IG_GRAPH       = 'https://graph.instagram.com/v21.0';
 const app    = express();
 app.use(express.json());
 
+app.use((req, _res, next) => {
+  console.log(`→ ${req.method} ${req.path}`);
+  next();
+});
+
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 let idxWeb    = null;
@@ -833,7 +838,12 @@ async function runStartupDiagnostics() {
   console.log(`   Diagnóstico:  ${PUBLIC_URL ? `${PUBLIC_URL}/health` : `http://localhost:${PORT}/health`}\n`);
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ HTTP listo en 0.0.0.0:${PORT}`);
+const server = app.listen(PORT, () => {
+  console.log(`✅ HTTP listo — puerto ${PORT}`);
   runStartupDiagnostics().catch((err) => console.error('❌ startup diagnostics:', err.message));
+});
+
+server.on('error', (err) => {
+  console.error(`❌ No se pudo abrir puerto ${PORT}:`, err.message);
+  process.exit(1);
 });
