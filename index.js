@@ -4,6 +4,7 @@
 // ============================================================
 
 require('dotenv').config();
+const http    = require('http');
 const express = require('express');
 const axios   = require('axios');
 const OpenAI  = require('openai').default;
@@ -24,6 +25,7 @@ const {
   DIRECTOR_API_KEY,
   REPLY_DELAY_MS = 8000,
   CONVERSATION_TTL_MS = 7200000,
+  MAX_MESSAGE_AGE_MS = 120000,
 } = process.env;
 
 const PORT = Number(process.env.PORT) || 3001;
@@ -33,6 +35,7 @@ const PUBLIC_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   : null;
 
 const MAX_MSG_LENGTH = 980;
+const MAX_MESSAGE_AGE = Number(MAX_MESSAGE_AGE_MS) || 120000;
 const TOP_K_WEB      = 10;
 const TOP_K_TIENDA   = 8;
 const EMBED_DIMS     = 512;
@@ -77,7 +80,6 @@ if (DIRECTOR_API_URL && DIRECTOR_API_KEY) {
   console.warn('⚠️  DIRECTOR_API_URL / DIRECTOR_API_KEY no definidas — instrucciones desactivadas');
 }
 
-const conversacionIds = new Map(); // senderId → id documento Firestore
 
 // ─── System Prompts ──────────────────────────────────────────
 
@@ -289,8 +291,44 @@ async function retrieveCatalog(query) {
 
 // ─── Anti-bucle: IDs de comentarios ya procesados ──────────────
 const processedComments = new Set();
-// Limpiar cada hora para no crecer indefinidamente
 setInterval(() => processedComments.clear(), 3600000);
+
+// ─── Anti-cola Meta: no responder DMs viejos ni duplicados ─────
+const processedDmIds = new Set();
+setInterval(() => processedDmIds.clear(), 3600000);
+
+function normalizeWebhookTimestamp(ts) {
+  if (!ts) return Date.now();
+  const n = Number(ts);
+  return n < 1e12 ? n * 1000 : n;
+}
+
+function shouldProcessDm({ messageId, timestamp }) {
+  const msgTime = normalizeWebhookTimestamp(timestamp);
+  const ageMs = Date.now() - msgTime;
+
+  if (ageMs > MAX_MESSAGE_AGE) {
+    console.log(`⏭️  DM en cola ignorado (${Math.round(ageMs / 1000)}s) mid=${messageId || '?'}`);
+    return false;
+  }
+
+  const key = messageId ? `${messageId}` : `ts:${msgTime}`;
+  if (processedDmIds.has(key)) {
+    console.log(`⏭️  DM duplicado ignorado mid=${key}`);
+    return false;
+  }
+  processedDmIds.add(key);
+  return true;
+}
+
+function handleIncomingDm({ senderId, text, username, messageId, timestamp, source }) {
+  if (!senderId || !text) return;
+  if (!shouldProcessDm({ messageId, timestamp })) return;
+  console.log(`📥 DM [${senderId}] (${source}): "${text}"`);
+  processMessage(senderId, text, username).catch((err) =>
+    console.error('❌ processMessage:', err.message)
+  );
+}
 
 // ─── Obtener contexto del post (caption + Vision) ────────────
 async function getPostContext(mediaId) {
@@ -385,10 +423,8 @@ async function guardarTurnoEnFirestore({ senderId, username, name, userMessage, 
       name: name || '',
       userMessage,
       botReply,
-      conversacionId: conversacionIds.get(String(senderId)) || null,
     });
     if (reg.conversacionId) {
-      conversacionIds.set(String(senderId), reg.conversacionId);
       console.log(`[conversations-instagram] Guardado: ${reg.conversacionId}`);
     }
   } catch (err) {
@@ -680,15 +716,14 @@ app.post('/webhook', (req, res) => {
     // ── DMs ──────────────────────────────────────────────────
     for (const event of (e.messaging || [])) {
       if (event.message && !event.message.is_echo) {
-        const senderId = event.sender?.id;
-        const text     = event.message?.text?.trim();
-        const username = event.sender?.username || '';
-        if (senderId && text) {
-          console.log(`📥 DM [${senderId}]: "${text}"`);
-          processMessage(senderId, text, username).catch((err) =>
-            console.error('❌ processMessage:', err.message)
-          );
-        }
+        handleIncomingDm({
+          senderId: event.sender?.id,
+          text: event.message?.text?.trim(),
+          username: event.sender?.username || '',
+          messageId: event.message?.mid,
+          timestamp: event.timestamp,
+          source: 'messaging',
+        });
       }
     }
 
@@ -697,17 +732,15 @@ app.post('/webhook', (req, res) => {
 
       // DMs formato changes
       if (change.field === 'messages') {
-        const senderId = change.value?.sender?.id;
-        const text     = change.value?.message?.text?.trim();
-        const username = change.value?.from?.username
-          || change.value?.sender?.username
-          || '';
-        if (senderId && text) {
-          console.log(`📥 DM(change) [${senderId}]: "${text}"`);
-          processMessage(senderId, text, username).catch((err) =>
-            console.error('❌ processMessage:', err.message)
-          );
-        }
+        const val = change.value;
+        handleIncomingDm({
+          senderId: val?.sender?.id,
+          text: val?.message?.text?.trim(),
+          username: val?.from?.username || val?.sender?.username || '',
+          messageId: val?.message?.mid,
+          timestamp: val?.timestamp,
+          source: 'changes',
+        });
       }
 
       // Comentarios en posts
@@ -789,9 +822,9 @@ app.get('/test-firestore', async (_req, res) => {
     const reg = await registrarTurnoDM({
       senderId: 'railway-test',
       username: 'railway_test',
+      name: 'Test',
       userMessage: 'test ping desde Railway',
       botReply: 'ok firestore',
-      conversacionId: null,
     });
     res.json({ ok: true, ...ping, testConversacionId: reg.conversacionId });
   } catch (e) {
@@ -817,6 +850,7 @@ async function runStartupDiagnostics() {
   console.log(`   Pinecone web: ${idxWeb    ? `✅ ${PINECONE_INDEX_WEB}`    : '❌'}`);
   console.log(`   Pinecone tda: ${idxTienda ? `✅ ${PINECONE_INDEX_TIENDA}` : '❌'}`);
   console.log(`   Delay:        ${REPLY_DELAY_MS / 1000}s`);
+  console.log(`   DM max edad:  ${MAX_MESSAGE_AGE / 1000}s (ignora cola Meta)`);
 
   if (!hasFirebaseConfig()) {
     console.log('   Firestore:    ❌ falta FIREBASE_SERVICE_ACCOUNT (o _BASE64)');
@@ -838,8 +872,10 @@ async function runStartupDiagnostics() {
   console.log(`   Diagnóstico:  ${PUBLIC_URL ? `${PUBLIC_URL}/health` : `http://localhost:${PORT}/health`}\n`);
 }
 
-const server = app.listen(PORT, () => {
-  console.log(`✅ HTTP listo — puerto ${PORT}`);
+const server = http.createServer(app);
+server.listen(PORT, '0.0.0.0', () => {
+  const addr = server.address();
+  console.log(`✅ HTTP listo en ${addr?.address}:${addr?.port}`);
   runStartupDiagnostics().catch((err) => console.error('❌ startup diagnostics:', err.message));
 });
 
